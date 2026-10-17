@@ -1,7 +1,7 @@
 {
   "id": "trunk-city-2000",
   "name": "Trunk City 2000",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A pixel-art city for each radio system, built from its talkgroups. Every call sends someone out: fire trucks, ambulances, buses, plows. Now and then, a flying saucer comes for a cow.",
   "api": 1,
   "access": "listen",

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1]
+
+- Vehicles move smoothly along the roads: each step is the 2-across, 1-down of isometric pixel art,
+  where before x and y rounded on frames of their own and sprites jiggled. They round corners
+  instead of hopping from one lane to the other.
+- Fixed: a radio's name bubble floated over the empty space beyond the map while its vehicle was
+  out there, out of sight.
+
 ## [0.2.0]
 
 - Every radio on the air is someone in town. The unit talking on a call becomes a vehicle of its

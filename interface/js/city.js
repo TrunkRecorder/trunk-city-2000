@@ -38,6 +38,17 @@ const MAX_PARTICLES = 700;
 
 /** World pixel of a point on the map (fi, fj in tiles). */
 const W = (fi, fj) => [(fi - fj) * 16, (fi + fj) * 8];
+/**
+ * The same for something moving, on the pixel grid: rounded along each of
+ * the map's axes (8 steps a tile), so along a road it steps 2 across and 1
+ * down together, the way isometric pixel art moves, instead of x and y each
+ * rounding on frames of their own and the sprite jiggling.
+ */
+const P = (fi, fj) => {
+  const a = Math.round(fi * 8),
+    b = Math.round(fj * 8);
+  return [2 * (a - b), a + b];
+};
 const tileOf = (city, k) => [Math.floor(k / city.N), k % city.N];
 
 // ── Things that move ─────────────────────────────────────────────────────────
@@ -69,6 +80,8 @@ class Mover {
 
   /** Off to road tile `to`; `then(mover)` when it's there. */
   go(to, then) {
+    // The way it was facing, for easing into the first turn of the new route.
+    this.came = this.dir;
     const path = roadPath(this.view.city, this.tile, to);
     this.onArrive = then ?? null;
     if (!path || path.length < 2) {
@@ -116,8 +129,16 @@ class Mover {
       bi = Math.floor(b / N),
       bj = b % N;
     if (a !== b) this.dir = [bi - ai, bj - aj];
-    const [di, dj] = this.dir;
-    // Drive on the right.
+    // Drive on the right: the lane is 0.22 of a tile to the right of the
+    // way it's going. Through a corner it eases from one side to the other
+    // over the half tiles either side of the turn, so the car rounds it
+    // instead of hopping across.
+    const step = (from, to) => (from === to ? null : [Math.floor(to / N) - Math.floor(from / N), (to % N) - (from % N)]);
+    const prev = (this.seg > 0 && step(this.path[this.seg - 1], a)) || this.came || this.dir;
+    const next = (this.seg + 2 < this.path.length && step(b, this.path[this.seg + 2])) || this.dir;
+    const [d0, d1, k] = this.t < 0.5 ? [prev, this.dir, this.t + 0.5] : [this.dir, next, this.t - 0.5];
+    const di = d0[0] + (d1[0] - d0[0]) * k,
+      dj = d0[1] + (d1[1] - d0[1]) * k;
     this.fi = ai + 0.5 + (bi - ai) * this.t - dj * 0.22;
     this.fj = aj + 0.5 + (bj - aj) * this.t + di * 0.22;
     this.depth = this.fi + this.fj;
@@ -130,7 +151,7 @@ class Mover {
 
   draw(ctx, time) {
     const s = this.sprite(time);
-    const [x, y] = W(this.fi, this.fj);
+    const [x, y] = P(this.fi, this.fj);
     const X = Math.round(x - s.ax),
       Y = Math.round(y - s.ay);
     if (this.talker?.talking) glow(ctx, s, X, Y, time);
@@ -139,7 +160,7 @@ class Mover {
 
   box(time) {
     const s = this.sprite(time);
-    const [x, y] = W(this.fi, this.fj);
+    const [x, y] = P(this.fi, this.fj);
     return [x - s.ax - 2, y - s.ay - 2, s.w + 4, s.h + 4];
   }
 }
@@ -167,13 +188,13 @@ class Thing {
 
   draw(ctx, time) {
     const s = this.spriteFn(time, this);
-    const [x, y] = W(this.fi, this.fj);
+    const [x, y] = P(this.fi, this.fj);
     ctx.drawImage(this.ambient && this.view.dim ? dimmed(s) : s.img, Math.round(x - s.ax), Math.round(y - s.ay - this.alt));
   }
 
   box(time) {
     const s = this.spriteFn(time, this);
-    const [x, y] = W(this.fi, this.fj);
+    const [x, y] = P(this.fi, this.fj);
     return [x - s.ax, y - s.ay - this.alt, s.w, s.h];
   }
 }
@@ -263,7 +284,7 @@ class Flyer {
 
   drawShadow(ctx) {
     if (!this.shadow) return;
-    const [x, y] = W(this.fi, this.fj);
+    const [x, y] = P(this.fi, this.fj);
     ctx.fillStyle = "rgba(0,0,0,0.22)";
     const w = this.shadow;
     ctx.fillRect(Math.round(x - w), Math.round(y - 1), w * 2, 2);
@@ -272,12 +293,12 @@ class Flyer {
 
   draw(ctx, time) {
     const s = this.spriteFn(time, this);
-    const [x, y] = W(this.fi, this.fj);
+    const [x, y] = P(this.fi, this.fj);
     ctx.drawImage(s.img, Math.round(x - s.ax), Math.round(y - s.ay - this.alt));
   }
 
   screen() {
-    const [x, y] = W(this.fi, this.fj);
+    const [x, y] = P(this.fi, this.fj);
     return [x, y - this.alt];
   }
 }
@@ -1071,17 +1092,20 @@ export class CityView {
 
   /** Where a talker is drawn: its vehicle, its train, or its building. */
   talkerAt(t) {
-    if (t.mover?.alive) {
+    const N = this.city.N;
+    const m = t.mover;
+    if (m?.alive) {
+      // Not drawn off the map, so nothing to label there.
+      if (m.fi < 0.15 || m.fj < 0.15 || m.fi > N - 0.15 || m.fj > N - 0.15) return null;
       const s = t.mover.sprite(this.time);
-      const [x, y] = W(t.mover.fi, t.mover.fj);
+      const [x, y] = P(t.mover.fi, t.mover.fj);
       return { x, y: y - s.ay, box: t.mover.box(this.time) };
     }
     const lead = t.train?.alive && t.train.parts[0];
     if (lead) {
-      const N = this.city.N;
       if (lead.fi < 0.5 || lead.fi > N - 0.5) return null;
       const s = S.vehicle("train", 0, 0, 0);
-      const [x, y] = W(lead.fi, lead.fj);
+      const [x, y] = P(lead.fi, lead.fj);
       return { x, y: y - s.ay, box: [x - s.ax, y - s.ay, s.w, s.h] };
     }
     const o = t.building;
@@ -1588,7 +1612,7 @@ export class CityView {
           long: true,
           draw: (c) => {
             const s = S.vehicle("train", 0, 0, 0);
-            const [x, y] = W(p.fi, p.fj);
+            const [x, y] = P(p.fi, p.fj);
             const X = Math.round(x - s.ax),
               Y = Math.round(y - s.ay);
             if (tr.talker?.talking) glow(c, s, X, Y, t);
@@ -1596,7 +1620,7 @@ export class CityView {
           },
           box: () => {
             const s = S.vehicle("train", 0, 0, 0);
-            const [x, y] = W(p.fi, p.fj);
+            const [x, y] = P(p.fi, p.fj);
             return [x - s.ax, y - s.ay, s.w, s.h];
           },
         });
