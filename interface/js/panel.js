@@ -46,7 +46,7 @@ export function openSettings({ getSystems, settings, onChange, onClose }) {
             <label class="check"><input type="checkbox" id="opt-whimsy" ${settings.whimsy ? "checked" : ""}> Unexplained phenomena (saucers, balloons, the occasional Bigfoot)</label>
             <label class="check"><input type="checkbox" id="opt-unknown" ${settings.unknown ? "checked" : ""}> Show calls on talkgroups that aren't in the talkgroup file</label>
             <label class="check">Background traffic <select id="opt-traffic">${[["none", "None"], ["light", "Light"], ["normal", "Busy"]].map(([v, l]) => `<option value="${v}" ${settings.traffic === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
-            <label class="check"><input type="checkbox" id="opt-dim" ${settings.dim ? "checked" : ""}> Quiet the city, so what's on the radio stands out</label>
+            <label class="check"><input type="checkbox" id="opt-dim" ${settings.dim ? "checked" : ""}> Fade the city, so what's on the radio stands out even more</label>
             <label class="check"><input type="checkbox" id="opt-ids" ${settings.unitIds ? "checked" : ""}> Label radios that have no name with their ID</label>
             <p class="hint">Talkgroups are sorted by their Tag, Category, Alpha Tag and Description, as RadioReference has them. Change any of them below; your choices are kept in this browser.</p>
           </section>

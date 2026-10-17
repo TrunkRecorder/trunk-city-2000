@@ -17,8 +17,8 @@ const DEFAULTS = {
   unknown: false,
   /** Background traffic: "none", "light" or "normal". Light, so what the radio does stands out. */
   traffic: "light",
-  /** The city a little quieter (less color and light), and what's on the radio at full strength. */
-  dim: true,
+  /** The city faded (less color and light), and what's on the radio at full strength. */
+  dim: false,
   /** Radios with no name labeled by their ID. */
   unitIds: false,
 };
@@ -26,7 +26,9 @@ const DEFAULTS = {
 export function load() {
   try {
     const s = JSON.parse(localStorage.getItem(KEY) ?? "{}");
-    return { ...structuredClone(DEFAULTS), ...s, systems: s.systems ?? {} };
+    // 0.2 faded the city by default and saved that; it's off now, once.
+    if ((s.v ?? 1) < 2) delete s.dim;
+    return { ...structuredClone(DEFAULTS), ...s, systems: s.systems ?? {}, v: 2 };
   } catch {
     return structuredClone(DEFAULTS);
   }

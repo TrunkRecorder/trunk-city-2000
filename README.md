@@ -50,9 +50,14 @@ It asks for listen access only: it can see and play what the recorder shows, and
   while. A tactical talkgroup joins whatever its dispatch started. A sign floats over each one,
   blinking while it's on the air. Its radios are its responders; on a system that doesn't say who's
   talking, stand-ins go instead.
-- **What's on the radio stands out.** Background traffic is light and the city a little quieter
-  (less color and light), so the radios, the incidents and their fire and smoke are what you
-  see. Both can be changed in City Planning.
+- **What's on the radio stands out,** in each service's color (blue police, orange fire, pink
+  EMS, green transit, amber public works…). Every radio's vehicle has a ring on the ground under
+  it, faint while it's been heard lately and pulsing while it talks, so it's never mistaken for
+  traffic. A radio that's talking leaves a trail of sparkles, and shows through any building it's
+  behind. One on its way to an incident shows its route: dots marching along the streets to a
+  ring where it's going. A dispatcher's building glows, with rays turning over it and radio rings
+  rising from its roof. Bubbles carry the service's color down their side. Background traffic is
+  light: a few cars, no buses or trains but the radio's.
 - **The news.** The ticker at the bottom has the latest headline; **More** opens the paper.
 - **Four at once.** **4** shows up to four cities side by side; the arrows on each one change which
   city it shows. Double-click a city to open it on its own.
@@ -115,8 +120,9 @@ Data, test and spare talkgroups start off.
   filter by kind; **All on**, **All off** and **Back to automatic** act on the talkgroups shown, and
   *Group … is …* sets a whole group at once (a transit agency's "Rail Maintenance" group, say);
 - choose whether calls on talkgroups that aren't in the file count;
-- set the background traffic (none, light or busy), whether the city is quieted so the radio
-  stands out, and whether radios with no name are labeled with their ID.
+- set the background traffic (none, light or busy), whether the city is faded so the radio
+  stands out even more (off unless you turn it on), and whether radios with no name are labeled
+  with their ID.
 
 Your choices are kept in this browser, not in the recorder. Each browser, and each person, has
 their own.

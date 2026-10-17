@@ -10,7 +10,7 @@
 // a tower rather than over it.
 
 import * as S from "./sprites.js";
-import { css, Pix, bitmapText, textWidth, sprite } from "./pixel.js";
+import { css, mix, Pix, bitmapText, textWidth, sprite } from "./pixel.js";
 import { G, roadPath, nearestRoad } from "./citygen.js";
 import { DIRS, NW, NE, SE, SW, toTile } from "./iso.js";
 import { chaos } from "./rng.js";
@@ -34,6 +34,29 @@ const UNIT_ACTS = new Set(["respond", "ambulance", "chase", "bus", "route", "con
 // often in 10, is a dispatcher, whatever it's called: its building speaks for it.
 const DISPATCH_TGS = 3;
 const DISPATCH_KEYS = 12;
+// Each service's color: its radios' ground rings, trails, routes and rays.
+export const TYPE_COLOR = {
+  fire: 0xff7a1a,
+  ems: 0xff4d6d,
+  police: 0x4da3ff,
+  hospital: 0xff6b9a,
+  emergency: 0xffd23f,
+  transit: 0x3ddc84,
+  schools: 0xffd400,
+  airport: 0x7fd4ff,
+  utilities: 0x34d0ff,
+  publicworks: 0xffa62b,
+  animal: 0xd8a868,
+  parks: 0x7ee05a,
+  corrections: 0xc0c0c8,
+  security: 0x9fa8ff,
+  military: 0xa8c860,
+  federal: 0x7f98ff,
+  government: 0xf6e7a8,
+  events: 0xe07cff,
+  other: 0xc58cff,
+};
+const colorOf = (tk) => TYPE_COLOR[tk?.ev?.type] ?? 0xffffff;
 const MAX_PARTICLES = 700;
 
 /** World pixel of a point on the map (fi, fj in tiles). */
@@ -154,6 +177,12 @@ class Mover {
     const [x, y] = P(this.fi, this.fj);
     const X = Math.round(x - s.ax),
       Y = Math.round(y - s.ay);
+    if (this.talker) {
+      // A ring on the ground in its service's color: faint while it's been
+      // heard lately, bright and pulsing while it talks.
+      const r = ring(colorOf(this.talker), this.talker.talking && Math.floor(time * 4) % 2 === 0);
+      ctx.drawImage(r.img, Math.round(x) - r.ax, Math.round(y) - r.ay);
+    }
     if (this.talker?.talking) glow(ctx, s, X, Y, time);
     ctx.drawImage(this.ambient && this.view.dim ? dimmed(s) : s.img, X, Y);
   }
@@ -161,7 +190,10 @@ class Mover {
   box(time) {
     const s = this.sprite(time);
     const [x, y] = P(this.fi, this.fj);
-    return [x - s.ax - 2, y - s.ay - 2, s.w + 4, s.h + 4];
+    // The sprite and its glow, and the ring under it.
+    const x0 = Math.min(x - s.ax - 2, x - 12),
+      y0 = y - s.ay - 2;
+    return [x0, y0, Math.max(x - s.ax + s.w + 2, x + 12) - x0, Math.max(y - s.ay + s.h + 2, y + 7) - y0];
   }
 }
 
@@ -505,7 +537,7 @@ export class CityView {
     const { city } = this;
     const roads = city.roadTiles.filter((k) => !city.bridge[k]);
     if (!roads.length) return;
-    const want = { none: 0, light: Math.max(2, Math.min(8, Math.round(roads.length / 45))), normal: Math.max(4, Math.min(36, Math.round(roads.length / 11))) }[this.traffic] ?? 0;
+    const want = { none: 0, light: Math.max(1, Math.min(4, Math.round(roads.length / 70))), normal: Math.max(4, Math.min(36, Math.round(roads.length / 11))) }[this.traffic] ?? 0;
     const cars = this.ents.filter((e) => e.ambient && e instanceof Mover && e.kind !== "bus");
     for (const m of cars.slice(want)) m.alive = false;
     for (let n = cars.length; n < want; n++) {
@@ -1056,7 +1088,9 @@ export class CityView {
     }
     const act = inc?.scen.act;
     if (inc && inc.target?.road >= 0 && !["bus", "route", "patrol", "train", "plane", "tower"].includes(act)) {
+      m.enRoute = true;
       m.go(inc.target.road, () => {
+        m.enRoute = false;
         m.onScene = true;
         if (act === "ambulance") {
           // To the nearest hospital, and wait there.
@@ -1067,8 +1101,11 @@ export class CityView {
           if (h) m.go(this.door(h));
         }
       });
-    } else if (["bus", "route", "patrol"].includes(act)) this.route(m, 3, () => this.park(m, home));
-    else this.park(m, home);
+    } else {
+      m.enRoute = false;
+      if (["bus", "route", "patrol"].includes(act)) this.route(m, 3, () => this.park(m, home));
+      else this.park(m, home);
+    }
   }
 
   /** `m` waits on a street near `home`. */
@@ -1082,6 +1119,7 @@ export class CityView {
   retire(t) {
     t.leaving = true;
     const m = t.mover;
+    if (m) m.enRoute = false;
     if (m?.alive)
       m.go(m.home, () => {
         m.alive = false;
@@ -1420,6 +1458,20 @@ export class CityView {
       if (m?.alive) m.lights = S.FLASHING.has(m.kind) && (tk.talking || !!(tk.inc && !tk.inc.over && tk.inc.live));
       if (!tk.talking && !tk.leaving && t - tk.heard > RECENT_S) this.retire(tk);
       if (tk.train && !tk.train.alive) tk.train = null;
+      if (!tk.talking) continue;
+      const c = colorOf(tk);
+      // A trail of sparkles behind a radio that's talking (fewer while it waits).
+      const N = this.city.N;
+      if (m?.alive && m.fi > 0.15 && m.fj > 0.15 && m.fi < N - 0.15 && m.fj < N - 0.15 && chaos() < dt * (m.arrived ? 6 : 22)) {
+        const [x, y] = P(m.fi, m.fj);
+        this.puff(x + chaos.range(-3, 3), y - chaos.range(1, 5), { color: chaos.chance(0.6) ? c : 0xffffff, size: 1, vx: chaos.range(-3, 3), vy: chaos.range(-8, -3), life: chaos.range(0.6, 1.1), grow: 0 });
+      }
+      // Rings from a building whose radio is talking.
+      const o = tk.building;
+      if (o?.spr && (tk._ring ?? 0) < t) {
+        tk._ring = t + 0.8;
+        this.rings.push({ x: o.wx + o.spr.ax, y: o.wy + o.spr.top, r: 2, max: 24, speed: 16, color: css(c) });
+      }
     }
 
     // Chimneys (fewer puffs when the city's quiet).
@@ -1625,6 +1677,50 @@ export class CityView {
           },
         });
       }
+    // The way radios are going to an incident: dots along the road, marching.
+    for (const tk of this.talkers.values()) {
+      const m = tk.mover;
+      if (!m?.alive || !m.enRoute || m.arrived) continue;
+      const c = css(colorOf(tk));
+      const ahead = m.path.slice(m.seg + 1);
+      const march = Math.floor(t * 6);
+      ahead.forEach((k, n) => {
+        const i = Math.floor(k / N) + 0.5,
+          j = (k % N) + 0.5;
+        const next = ahead[n + 1];
+        // Two dots a tile, toward the next one; a dark edge under each, to stand out on any ground.
+        const dots = [W(i, j)];
+        if (next != null) dots.push(W((i + Math.floor(next / N) + 0.5) / 2, (j + (next % N) + 0.5) / 2));
+        const [x, y] = dots[0];
+        ground.push({
+          depth: i + j - 0.4,
+          fi: i,
+          fj: j,
+          draw: (g) => {
+            dots.forEach(([dx, dy], d) => {
+              const on = (march - (n * 2 + d)) % 4 === 0 || (march - (n * 2 + d)) % 4 === 1;
+              g.globalAlpha = on ? 1 : 0.55;
+              g.fillStyle = "#202020";
+              g.fillRect(Math.round(dx) - 1, Math.round(dy), 3, 2);
+              g.fillStyle = on ? "#ffffff" : c;
+              g.fillRect(Math.round(dx) - 1, Math.round(dy) - 1, 3, 2);
+              if (on) {
+                g.fillStyle = c;
+                g.fillRect(Math.round(dx), Math.round(dy) - 1, 1, 2);
+              }
+            });
+            if (n === ahead.length - 1) {
+              // Where it's going: a ring.
+              g.globalAlpha = 1;
+              const r = ring(colorOf(tk), true);
+              g.drawImage(r.img, Math.round(x) - r.ax, Math.round(y) - r.ay);
+            }
+            g.globalAlpha = 1;
+          },
+          box: () => [x - 16, y - 8, 32, 16],
+        });
+      });
+    }
     // Buildings whose radios are talking: lit up, at full strength.
     for (const tk of this.talkers.values()) {
       const o = tk.building;
@@ -1658,6 +1754,30 @@ export class CityView {
     }
     list.sort((a, b) => a.depth - b.depth || (a.order ?? -1) - (b.order ?? -1));
     for (const e of list) e.draw(ctx, t);
+    // A radio talking behind a building shows through it, as its glow.
+    for (const tk of this.talkers.values()) {
+      const m = tk.mover;
+      if (!m?.alive || !tk.talking || !list.includes(m)) continue;
+      const [bx, by, bw, bh] = m.box(t);
+      const i0 = Math.floor(m.fi),
+        j0 = Math.floor(m.fj);
+      let hidden = false;
+      for (let a = 0; a <= 6 && !hidden; a++)
+        for (let b = 0; b <= 6 && !hidden; b++) {
+          const i = i0 + a,
+            j = j0 + b;
+          if (i >= N || j >= N) continue;
+          const id = city.obj[i * N + j];
+          const o = id >= 0 && city.objects[id];
+          if (o && o.depth > m.depth && o.art[0] !== "tree" && !(o.wx > bx + bw || o.wx + o.spr.w < bx || o.wy > by + bh || o.wy + o.spr.h < by)) hidden = true;
+        }
+      if (!hidden) continue;
+      const sp = m.sprite(t);
+      const [x, y] = P(m.fi, m.fj);
+      ctx.globalAlpha = 0.7;
+      glow(ctx, sp, Math.round(x - sp.ax), Math.round(y - sp.ay), t, true);
+      ctx.globalAlpha = 1;
+    }
 
     // Smoke, water, sparks.
     for (const p of this.particles) {
@@ -1711,6 +1831,18 @@ export class CityView {
         ctx.fillRect(x + 2 * r, y - r, 1, 2 * r);
       }
     }
+    // Rays turning over a building whose radio is talking.
+    for (const tk of this.talkers.values()) {
+      const o = tk.building;
+      if (!o?.spr || !tk.talking) continue;
+      const cx = o.wx + o.spr.ax,
+        cy = o.wy + o.spr.top + 2;
+      ctx.fillStyle = css(colorOf(tk));
+      for (let k = 0; k < 8; k++) {
+        const a = (k * Math.PI) / 4 + t * 1.2;
+        for (let r = 9; r <= 14; r++) ctx.fillRect(Math.round(cx + Math.cos(a) * r * 1.4), Math.round(cy + Math.sin(a) * r * 0.75), 1, 1);
+      }
+    }
     // Incident signs.
     this.icons = [];
     for (const inc of this.incidents) {
@@ -1737,7 +1869,7 @@ export class CityView {
       if (!text) continue;
       const at = this.talkerAt(tk);
       if (!at || !inView(at.x, at.y, 40)) continue;
-      const b = bubble(text);
+      const b = bubble(text, colorOf(tk));
       let x = Math.round(at.x - b.ax),
         y = Math.round(at.y - 3 - b.ay);
       // Out of each other's way: step up.
@@ -1930,7 +2062,7 @@ export function talkerKind(ev, name = "") {
 }
 
 /** A glow around sprite `s` drawn at (x, y): pulsing, for a radio that's talking. */
-function glow(ctx, s, x, y, time) {
+function glow(ctx, s, x, y, time, keepAlpha = false) {
   if (!s.halo) {
     const c = document.createElement("canvas");
     c.width = s.w + 4;
@@ -1942,9 +2074,10 @@ function glow(ctx, s, x, y, time) {
     g.fillRect(0, 0, c.width, c.height);
     s.halo = c;
   }
-  ctx.globalAlpha = 0.55 + 0.45 * Math.sin(time * 7);
+  const was = ctx.globalAlpha;
+  ctx.globalAlpha = (keepAlpha ? was : 1) * (0.55 + 0.45 * Math.sin(time * 7));
   ctx.drawImage(s.halo, x - 2, y - 2);
-  ctx.globalAlpha = 1;
+  ctx.globalAlpha = was;
 }
 
 /** A canvas, quieter: less color and light. */
@@ -1970,13 +2103,35 @@ function dimmed(s) {
   return (s.dim ??= dimCopy(s.img, s.w, s.h));
 }
 
+/** A diamond ring on the ground, a tile wide, in `color`: brighter when `on`. Anchored at its middle. */
+const rings = new Map();
+function ring(color, on) {
+  const key = `${color}|${on}`;
+  let r = rings.get(key);
+  if (r) return r;
+  const p = new Pix(25, 13);
+  const c = on ? color : mix(color, 0x000000, 0.25);
+  for (let dx = -11; dx <= 11; dx++) {
+    const dy = Math.round((11 - Math.abs(dx)) / 2);
+    p.set(12 + dx, 6 - dy, c, on ? 255 : 150);
+    p.set(12 + dx, 6 + dy, c, on ? 255 : 150);
+    if (on) {
+      p.set(12 + dx, 6 - dy + 1, c, 90);
+      p.set(12 + dx, 6 + dy - 1, c, 90);
+    }
+  }
+  rings.set(key, (r = sprite(p, 12, 6)));
+  return r;
+}
+
 /** A speech bubble with `text` in it (the pixel font, capitals), its anchor the tip of its tail. */
 const bubbles = new Map();
-function bubble(text) {
+function bubble(text, color = 0xffffff) {
   text = text.toUpperCase().slice(0, 18);
-  let b = bubbles.get(text);
+  const key = `${text}|${color}`;
+  let b = bubbles.get(key);
   if (b) return b;
-  const w = textWidth(text) + 6,
+  const w = textWidth(text) + 7,
     h = 13;
   const p = new Pix(w, h + 3);
   p.rect(1, 0, w - 2, h, 0x202020);
@@ -1990,9 +2145,10 @@ function bubble(text) {
   p.set(mid - 2, h, 0x202020), p.set(mid + 2, h, 0x202020);
   p.set(mid - 1, h + 1, 0x202020), p.set(mid + 1, h + 1, 0x202020);
   p.set(mid, h + 2, 0x202020);
-  bitmapText(p, text, 3, 3, 0x202020);
+  p.rect(1, 1, 2, h - 2, color); // its service's color, down the side
+  bitmapText(p, text, 4, 3, 0x202020);
   if (bubbles.size > 500) bubbles.clear();
-  bubbles.set(text, (b = sprite(p, mid, h + 2)));
+  bubbles.set(key, (b = sprite(p, mid, h + 2)));
   return b;
 }
 

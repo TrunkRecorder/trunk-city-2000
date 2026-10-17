@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0]
+
+- The city is in full color again: what's on the radio stands out by its own light instead of the
+  rest being faded (fading is still in City Planning, off unless turned on; it's turned off once
+  for anyone who had it from 0.2).
+- Each service has its color (police blue, fire orange, EMS pink, transit green…), and its radios
+  show it: a ring on the ground under every radio's vehicle (faint when heard lately, pulsing
+  while it talks), a trail of sparkles while it talks, dots marching along its route to an
+  incident, and a stripe down its name bubble.
+- A dispatcher's building, when it talks, glows with rays turning over it and radio rings rising.
+- A radio talking behind a building shows through it.
+- Fewer background cars (at most four, on light), and no background buses.
+
 ## [0.2.1]
 
 - Vehicles move smoothly along the roads: each step is the 2-across, 1-down of isometric pixel art,
