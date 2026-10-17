@@ -53,7 +53,7 @@ if (args.includes("--dark")) await send("Emulation.setEmulatedMedia", { features
 await send("Page.navigate", { url });
 await sleep(wait / 2);
 if (opt("eval")) {
-  const r = await send("Runtime.evaluate", { expression: opt("eval"), awaitPromise: true, returnByValue: true });
+  const r = await send("Runtime.evaluate", { expression: opt("eval"), awaitPromise: true, returnByValue: true, userGesture: true });
   if (r?.exceptionDetails) console.log("[eval error]", r.exceptionDetails.exception?.description);
   else if (r?.result?.value !== undefined) console.log("[eval]", JSON.stringify(r.result.value));
 }

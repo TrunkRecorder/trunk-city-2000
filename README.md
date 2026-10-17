@@ -49,11 +49,16 @@ It asks for listen access only: it can see and play what the recorder shows, and
 
 Drag to move around, scroll or pinch to zoom, and **⤢** to see the whole city.
 
+**⛶ Full screen** fills the screen with the city, or the four, for a wall or a spare monitor.
+After a few seconds without a move, the bars and the pointer step aside; move the mouse or press a
+key and they're back.
+
 | Key | |
 |---|---|
 | ← → | The previous / next city |
 | 1, 4 | One city, four cities |
 | + − 0 | Zoom in, out, fit |
+| F | Full screen |
 | U | Summon a saucer |
 
 **🔊 Listen** plays live audio from the city (or cities) on screen, for the talkgroups that are on.

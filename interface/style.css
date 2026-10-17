@@ -606,6 +606,19 @@ body[data-view="quad"] .zoom {
   margin-top: 6px;
 }
 
+/* ── Full screen: the bars and the pointer step aside when nothing moves ── */
+
+body.full.idle .bar,
+body.full.idle .stats,
+body.full.idle #demo-note,
+body.full.idle .zoom,
+body.full.idle .tile-head .bevel {
+  display: none;
+}
+body.full.idle .viewport {
+  cursor: none;
+}
+
 /* ── Phones ── */
 
 @media (max-width: 700px) {

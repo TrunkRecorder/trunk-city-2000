@@ -451,6 +451,52 @@ function shortOf(system) {
   return rec.status?.systems?.find((s) => s.index === system)?.shortName;
 }
 
+// ── Full screen ──────────────────────────────────────────────────────────────
+//
+// The whole page, for a wall or a spare monitor. In full screen the bars
+// and the pointer get out of the way after a few seconds without a move,
+// and come back with one.
+
+const IDLE_MS = 3000;
+const canFull = document.fullscreenEnabled || document.webkitFullscreenEnabled;
+const isFull = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+let idleTimer = null;
+
+$("full").hidden = !canFull;
+$("full").addEventListener("click", toggleFull);
+
+function toggleFull() {
+  if (isFull()) (document.exitFullscreen ?? document.webkitExitFullscreen).call(document);
+  else {
+    const el = document.documentElement;
+    // Safari's older API returns nothing; the others a promise that fails when the browser says no.
+    (el.requestFullscreen ?? el.webkitRequestFullscreen).call(el)?.catch?.(() => {});
+  }
+}
+
+function onFull() {
+  const full = isFull();
+  document.body.classList.toggle("full", full);
+  $("full").setAttribute("aria-pressed", String(full));
+  $("full").textContent = full ? "⛶ Exit full screen" : "⛶ Full screen";
+  wake();
+}
+document.addEventListener("fullscreenchange", onFull);
+document.addEventListener("webkitfullscreenchange", onFull);
+
+function wake() {
+  document.body.classList.remove("idle");
+  clearTimeout(idleTimer);
+  if (!isFull()) return;
+  idleTimer = setTimeout(() => {
+    // Not while City Planning or the paper is open.
+    if (!$("settings").hidden || !$("newslog").hidden) return wake();
+    document.body.classList.add("idle");
+    $("tip").hidden = true;
+  }, IDLE_MS);
+}
+for (const type of ["pointermove", "pointerdown", "keydown", "wheel"]) document.addEventListener(type, wake, { passive: true });
+
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 $("settings-btn").addEventListener("click", () => {
@@ -480,6 +526,7 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "-") zoom(-1);
   else if (e.key === "0") $("zfit").click();
   else if (e.key === "u" && slots[0]) cities.get(slots[0].short)?.view.whimsy("ufo");
+  else if ((e.key === "f" || e.key === "F") && canFull) toggleFull();
   else return;
   e.preventDefault();
 });

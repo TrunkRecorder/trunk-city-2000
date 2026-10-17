@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- Full screen (the ⛶ button, or F): the city fills the screen, and the bars and the pointer step
+  aside when nothing moves, for a wall or a spare monitor.
+
 ## [0.1.0]
 
 The first release.
