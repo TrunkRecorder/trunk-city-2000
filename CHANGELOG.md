@@ -1,10 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-- Full screen (the ⛶ button, or F): the city fills the screen, and the bars and the pointer step
-  aside when nothing moves, for a wall or a spare monitor.
-
 ## [0.1.0]
 
 The first release.
@@ -22,5 +17,7 @@ The first release.
   browser.
 - Headlines, a news ticker and the Trunk City Times.
 - Live audio from the cities on screen.
+- Full screen (the ⛶ button, or F), with the bars and the pointer out of the way when nothing
+  moves, for a wall or a spare monitor.
 - Saucers, balloons, a blimp, geese, ducks, a December sleigh, and Bigfoot.
 - A demo (`?demo`) with four made-up systems.
