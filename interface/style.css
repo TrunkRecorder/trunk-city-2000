@@ -437,6 +437,13 @@ body[data-view="quad"] .zoom {
   font-weight: normal;
   font-size: 11px;
 }
+.tip .air,
+.tip .radios .talking {
+  color: var(--off);
+}
+.tip .radios {
+  margin: 4px 0 0;
+}
 .tip li.more {
   list-style: none;
   margin-left: -14px;

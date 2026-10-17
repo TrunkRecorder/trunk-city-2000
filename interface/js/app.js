@@ -92,6 +92,8 @@ function cityFor(short) {
     whimsy: () => settings.whimsy,
     whimsyEvery: demo ? [30, 90] : [90, 300],
     whimsyFirst: demo ? [6, 20] : [25, 80],
+    look: () => ({ traffic: settings.traffic, dim: settings.dim }),
+    unitIds: () => settings.unitIds,
   });
   cities.set(short, (c = { key, city, view, canvas, last: performance.now() }));
   return c;
@@ -114,7 +116,10 @@ function syncCalls() {
   for (const c of rec.calls ?? []) {
     const key = `${c.systemName}:${c.id}`;
     now.add(key);
-    if (onAir.has(key)) continue;
+    if (onAir.has(key)) {
+      talker(onAir.get(key), c);
+      continue;
+    }
     const sys = bySystem.get(c.systemName);
     const tg = sys?.tgs.get(c.talkgroup);
     if (!sys?.on || (tg ? !tg.on : !settings.unknown)) {
@@ -131,15 +136,40 @@ function syncCalls() {
       emergency: c.emergency,
       tac: !!tg && TAC.test(`${tg.tag} ${tg.alphaTag}`) && !/dispatch|disp\b/i.test(`${tg.tag} ${tg.alphaTag}`),
     };
-    onAir.set(key, { short: c.systemName, ev });
+    const v = { short: c.systemName, ev, unit: null };
+    onAir.set(key, v);
     today.set(c.systemName, (today.get(c.systemName) ?? 0) + 1);
     cityFor(c.systemName)?.view.callStart(ev);
+    talker(v, c);
   }
   for (const [key, v] of onAir)
     if (!now.has(key)) {
       onAir.delete(key);
-      if (v) cities.get(v.short)?.view.callEnd(v.ev);
+      if (v) end(v);
     }
+}
+
+/**
+ * Who's talking on a call: the latest of its sources (the radios that have
+ * talked on it, in order). Known even on encrypted talkgroups: the control
+ * channel says who.
+ */
+function talker(v, c) {
+  if (!v) return;
+  const unit = c.sources?.at(-1);
+  if (!unit) return;
+  const view = cities.get(v.short)?.view;
+  if (!view) return;
+  if (v.unit != null && v.unit !== unit) view.quiet(v.unit);
+  v.unit = unit;
+  view.talker(v.ev, unit, rec.unitName?.(v.short, unit) ?? "");
+}
+
+function end(v) {
+  const view = cities.get(v.short)?.view;
+  if (!view) return;
+  view.callEnd(v.ev);
+  if (v.unit != null) view.quiet(v.unit);
 }
 
 // ── News ─────────────────────────────────────────────────────────────────────
@@ -216,6 +246,10 @@ function hover(short, info, x, y) {
     const inc = info.incident;
     const n = (newsBy.get(short) ?? []).find((m) => m.text && inc.ev && m.src.startsWith(inc.ev.alphaTag));
     html = `<b>${esc(n?.text ?? TYPE_NAMES[inc.type])}</b><br><span class="src">${esc(inc.ev?.alphaTag ?? "")}${inc.ev?.encrypted ? " · encrypted" : ""} · ${inc.live ? "on the air" : "quiet now"}</span>`;
+  } else if (info.talker) {
+    const tk = info.talker;
+    const ago = Math.max(0, Math.round(info.time - tk.heard));
+    html = `<b>${esc(tk.name || `Radio ${tk.unit}`)}</b><br><span class="src">${tk.name ? `Radio ${esc(tk.unit)} · ` : ""}${esc(tk.ev?.alphaTag ?? "")}${tk.ev?.encrypted ? " · encrypted" : ""}</span><br>${tk.talking ? `<b class="air">On the air</b>` : `Heard ${ago < 60 ? `${ago} s` : `${Math.round(ago / 60)} min`} ago`}`;
   } else if (info.facility) {
     const f = info.facility;
     const talking = new Set();
@@ -225,6 +259,9 @@ function hover(short, info, x, y) {
     html = `<b>${esc(f.name ?? "")}</b>${f.type && TYPE_NAMES[f.type] ? `<br><span class="src">${esc(TYPE_NAMES[f.type])}</span>` : ""}`;
     if (tgs.length)
       html += `<ul>${shown.map((t) => `<li class="${talking.has(t.talkgroup) ? "talking" : ""}">${esc(t.alphaTag)}</li>`).join("")}${tgs.length > shown.length ? `<li class="more">and ${tgs.length - shown.length} more</li>` : ""}</ul>`;
+    // Its radios: the dispatchers and consoles heard lately.
+    const radios = (info.radios ?? []).slice(0, 5);
+    if (radios.length) html += `<p class="radios">${radios.map((tk) => `<span class="${tk.talking ? "talking" : ""}">${esc(tk.name || `Radio ${tk.unit}`)}</span>`).join(", ")}</p>`;
   }
   if (!html) {
     tip.hidden = true;
@@ -506,7 +543,10 @@ $("settings-btn").addEventListener("click", () => {
     onChange: () => {
       Store.save(settings);
       loadSystems();
+      // The calls on the air start again under the new choices.
+      for (const v of onAir.values()) if (v) end(v);
       onAir.clear();
+      for (const c of cities.values()) c.view.setLook({ traffic: settings.traffic, dim: settings.dim });
       layout();
     },
     onClose: () => $("settings-btn").focus(),
@@ -580,7 +620,12 @@ rec.on("hello", () => {
 
 let lastStats = 0,
   lastHidden = 0;
+// 30 frames a second is plenty for pixel art, and half the work.
+const FRAME_MS = 1000 / 30 - 2;
+let lastFrame = 0;
 function loop(now) {
+  if (now - lastFrame < FRAME_MS) return requestAnimationFrame(loop);
+  lastFrame = now;
   for (const s of slots) cities.get(s.short)?.view.frame(now);
   // Cities out of view keep going, slowly, so they're as busy as their radio when you look.
   if (now - lastHidden > 500) {

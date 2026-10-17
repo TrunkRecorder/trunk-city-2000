@@ -1,7 +1,9 @@
 // A pretend recorder, for ?demo: four made-up systems with talkgroup files
 // like RadioReference's, and calls coming and going on them, the way a busy
-// evening sounds (dispatch talks most; a call is often answered). It has the
-// parts of TrunkClient this interface uses.
+// evening sounds (dispatch talks most; a call is often answered, dispatcher
+// and unit taking turns). Each talkgroup has its radios, most with names
+// (Engine 7, Car 214), some without. It has the parts of TrunkClient this
+// interface uses.
 
 const SYSTEMS = [
   {
@@ -131,6 +133,9 @@ export class DemoClient {
     this.nextId = 1;
     this.followUps = [];
     this._tg = new Map();
+    this.pools = new Map(); // "short:tg" → { dispatch, units }
+    this.names = new Map(); // "short:unit" → name
+    this.nextUnit = 1001;
     this.start = performance.now();
     setTimeout(() => this.emit("hello", {}), 0);
     setInterval(() => this.tick(), 500);
@@ -152,6 +157,51 @@ export class DemoClient {
     return this._tg.get(short);
   }
 
+  unitName(short, unit) {
+    return this.names.get(`${short}:${unit}`) ?? "";
+  }
+
+  /** A talkgroup's radios: a dispatcher, and units named for what it is. */
+  pool(short, tg) {
+    const key = `${short}:${tg.talkgroup}`;
+    let p = this.pools.get(key);
+    if (p) return p;
+    const text = `${tg.alphaTag} ${tg.description} ${tg.tag}`;
+    const kinds = [
+      [/fire|\bfd\b|\bfg\b|arff|marine/i, ["Engine", "Engine", "Truck", "Medic", "Battalion"]],
+      [/ems|medic/i, ["Medic", "Medic", "Ambulance"]],
+      [/\bpd\b|police|sheriff|\bso\b|mtpd|law|k-?9|cid|traffic unit/i, ["Car", "Car", "Unit", "Sgt"]],
+      [/school/i, ["School Bus"]],
+      [/bus|para/i, ["Bus", "Bus", "Supv"]],
+      [/rail|train|yard/i, ["Train"]],
+      [/animal/i, ["Animal Ctl"]],
+      [/park|lifeguard|beach/i, ["Parks", "Ranger"]],
+      [/dpw|street|sanit|trash|snow|roads|signal|track|power|water|sewer|electric|light|waste/i, ["DPW", "Crew", "Truck"]],
+      [/jail|corrections/i, ["Transport", "Officer"]],
+      [/guard|coast|ng\b/i, ["Guard"]],
+    ];
+    const names = kinds.find(([re]) => re.test(text))?.[1] ?? null;
+    const agency = tg.alphaTag.split(/\s+/)[0];
+    const add = (name) => {
+      const unit = this.nextUnit++;
+      if (name) this.names.set(`${short}:${unit}`, name);
+      return unit;
+    };
+    // One dispatcher for an agency, whichever of its talkgroups it's on.
+    this.dispatchers ??= new Map();
+    const dk = `${short}:${agency}`;
+    if (!this.dispatchers.has(dk)) this.dispatchers.set(dk, add(`${agency} Dispatch`));
+    p = { dispatch: this.dispatchers.get(dk), units: [] };
+    if (names)
+      for (let n = 0; n < 3 + Math.floor(Math.random() * 4); n++) {
+        const base = names[Math.floor(Math.random() * names.length)];
+        // Most radios have names; some don't.
+        p.units.push(add(Math.random() < 0.8 ? `${base} ${base === "Car" || base === "Bus" || base === "Train" ? 100 + Math.floor(Math.random() * 800) : 1 + Math.floor(Math.random() * 30)}` : ""));
+      }
+    this.pools.set(key, p);
+    return p;
+  }
+
   listen() {}
   callUrl() {
     return "";
@@ -165,7 +215,7 @@ export class DemoClient {
     // Answers to earlier calls.
     for (const f of this.followUps.splice(0)) {
       if (f.at > now) this.followUps.push(f);
-      else this.begin(f.sys, f.tg, now, f.left);
+      else this.begin(f.sys, f.tg, now, f.left, f.after);
     }
     // New calls: busier on dispatch.
     SYSTEMS.forEach((s, index) => {
@@ -180,10 +230,13 @@ export class DemoClient {
     this.emit("status", {});
   }
 
-  begin(index, tg, now, left) {
+  begin(index, tg, now, left, after = null) {
     const s = SYSTEMS[index];
     if (this.calls.some((c) => c.systemName === s.shortName && c.talkgroup === tg.talkgroup)) return;
     const len = 2 + Math.random() * 8;
+    // Dispatcher and units take turns.
+    const p = this.pool(s.shortName, tg);
+    const unit = p.units.length && (after === p.dispatch || (after == null && Math.random() < 0.4)) ? p.units[Math.floor(Math.random() * p.units.length)] : p.dispatch;
     this.calls.push({
       id: this.nextId++,
       system: index,
@@ -196,8 +249,9 @@ export class DemoClient {
       reason: /E/.test(tg.mode) ? "encrypted" : null,
       startS: now,
       endS: now + len,
+      sources: [unit],
     });
     // Someone answers.
-    if (left > 0 && Math.random() < 0.75) this.followUps.push({ sys: index, tg, left: left - 1, at: now + len + 0.5 + Math.random() * 6 });
+    if (left > 0 && Math.random() < 0.75) this.followUps.push({ sys: index, tg, left: left - 1, after: unit, at: now + len + 0.5 + Math.random() * 6 });
   }
 }

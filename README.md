@@ -12,7 +12,8 @@ comes for a cow.
 
 It isn't what the calls are really about. Nobody here knows that, and an encrypted call says
 nothing at all. It's something of the right kind, so the city is as busy as the radio is. It only
-needs to know that a talkgroup is on the air, so encrypted talkgroups count too.
+needs to know that a talkgroup is on the air, and which radio is talking, so encrypted talkgroups
+count too.
 
 ## Getting it
 
@@ -35,10 +36,23 @@ It asks for listen access only: it can see and play what the recorder shows, and
 - **Every talkgroup has a home** in its city: hover over a building to see whose it is, with the
   talkgroups on the air right now marked. Little radio waves rise over buildings whose talkgroups
   are talking.
+- **Every radio is someone in town.** The radio talking on a call (its unit ID, which the
+  control channel gives even for encrypted calls) becomes a vehicle of its talkgroup's kind: a
+  patrol car on a police talkgroup, an engine on a fire one (a ladder truck if it's called Truck,
+  an ambulance if it's Medic), a bus, a plow, a jail van. It drives out from its talkgroup's
+  building to whatever that talkgroup is busy with, and waits there. While it's transmitting it
+  glows, with its name (its alias, from your unit names or heard on the air) in a bubble over
+  it. Radios heard lately stay around for a couple of minutes, then drive home. Dispatchers are
+  their buildings, which light up when they talk: a radio named like one (Dispatch, Console), or
+  one that talks on three talkgroups in 15 minutes or keys up a dozen times in 10.
 - **Calls set things going.** A talkgroup's first call starts something; the calls after it
   (dispatch, then units answering) keep it going; it winds down when the talkgroup has been quiet a
   while. A tactical talkgroup joins whatever its dispatch started. A sign floats over each one,
-  blinking while it's on the air.
+  blinking while it's on the air. Its radios are its responders; on a system that doesn't say who's
+  talking, stand-ins go instead.
+- **What's on the radio stands out.** Background traffic is light and the city a little quieter
+  (less color and light), so the radios, the incidents and their fire and smoke are what you
+  see. Both can be changed in City Planning.
 - **The news.** The ticker at the bottom has the latest headline; **More** opens the paper.
 - **Four at once.** **4** shows up to four cities side by side; the arrows on each one change which
   city it shows. Double-click a city to open it on its own.
@@ -100,7 +114,9 @@ Data, test and spare talkgroups start off.
 - open a system's talkgroups: turn each one on or off, or say what it is. The buttons at the top
   filter by kind; **All on**, **All off** and **Back to automatic** act on the talkgroups shown, and
   *Group … is …* sets a whole group at once (a transit agency's "Rail Maintenance" group, say);
-- choose whether calls on talkgroups that aren't in the file count.
+- choose whether calls on talkgroups that aren't in the file count;
+- set the background traffic (none, light or busy), whether the city is quieted so the radio
+  stands out, and whether radios with no name are labeled with their ID.
 
 Your choices are kept in this browser, not in the recorder. Each browser, and each person, has
 their own.
@@ -149,7 +165,9 @@ node --test test/*.test.mjs
 ```
 
 `node tools/shoot.mjs <url> <file.png>` runs the page in headless Chrome and saves a screenshot,
-printing anything the page logs. The screenshots in `interface/screenshots/` come from the demo.
+printing anything the page logs; `--count 4 --every 2` takes several, to see things move. The
+screenshots in `interface/screenshots/` come from the demo. `tools/occlusion.js` checks, pixel
+for pixel, that buildings hide what's behind them (how to run it is at its top).
 
 Releasing works as in the
 [interface template](https://github.com/TrunkRecorder/trunk-interface-template#releasing): set

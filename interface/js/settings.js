@@ -15,6 +15,12 @@ const DEFAULTS = {
   whimsy: true,
   /** Calls on talkgroups that aren't in the talkgroup file: shown as "other". */
   unknown: false,
+  /** Background traffic: "none", "light" or "normal". Light, so what the radio does stands out. */
+  traffic: "light",
+  /** The city a little quieter (less color and light), and what's on the radio at full strength. */
+  dim: true,
+  /** Radios with no name labeled by their ID. */
+  unitIds: false,
 };
 
 export function load() {

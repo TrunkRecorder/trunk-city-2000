@@ -4,6 +4,7 @@
 // and for checking the page runs.
 //
 //   node tools/shoot.mjs http://localhost:8099/?demo out.png [--wait 8] [--size 1280x800] [--eval "js"] [--dark]
+//                        [--count 4 --every 2]
 //
 // --eval runs in the page after half the wait (open a panel, press a key…).
 
@@ -58,10 +59,15 @@ if (opt("eval")) {
   else if (r?.result?.value !== undefined) console.log("[eval]", JSON.stringify(r.result.value));
 }
 await sleep(wait / 2);
-if (out) {
+// --count n --every s: n screenshots s seconds apart (out-1.png, out-2.png…), to see motion.
+const count = Number(opt("count", 1)),
+  every = Number(opt("every", 2)) * 1000;
+for (let n = 1; out && n <= count; n++) {
+  const file = count > 1 ? out.replace(/\.png$/, `-${n}.png`) : out;
   const shot = await send("Page.captureScreenshot", { format: "png" });
-  writeFileSync(out, Buffer.from(shot.data, "base64"));
-  console.log(`saved ${out}`);
+  writeFileSync(file, Buffer.from(shot.data, "base64"));
+  console.log(`saved ${file}`);
+  if (n < count) await sleep(every);
 }
 ws.close();
 chrome.kill();

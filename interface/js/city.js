@@ -10,7 +10,7 @@
 // a tower rather than over it.
 
 import * as S from "./sprites.js";
-import { css } from "./pixel.js";
+import { css, Pix, bitmapText, textWidth, sprite } from "./pixel.js";
 import { G, roadPath, nearestRoad } from "./citygen.js";
 import { DIRS, NW, NE, SE, SW, toTile } from "./iso.js";
 import { chaos } from "./rng.js";
@@ -18,8 +18,22 @@ import { pickScenario, headline, WHIMSY } from "./scenarios.js";
 
 const TALL = 110; // room above the map for the tallest building
 const ZOOMS = [1, 2, 3, 4, 6, 8];
-const HOLD_S = 18; // an incident lasts this long after its talkgroup goes quiet
+const HOLD_S = 30; // an incident lasts this long after its talkgroup goes quiet
+// Everything that moves goes at this fraction of the speeds below: the city
+// is for watching, not racing.
+const PACE = 0.6;
 const MAX_INCIDENTS = 14;
+// A radio heard on the air stays in town this long after it last talked.
+const RECENT_S = 150;
+const MAX_TALKERS = 40;
+// An incident waits this long for its talkgroup's radios to show up before
+// sending generic responders (systems that don't say who's talking).
+const UNIT_WAIT_S = 4;
+const UNIT_ACTS = new Set(["respond", "ambulance", "chase", "bus", "route", "convoy", "patrol"]);
+// A radio that talks on this many talkgroups in 15 minutes, or keys up this
+// often in 10, is a dispatcher, whatever it's called: its building speaks for it.
+const DISPATCH_TGS = 3;
+const DISPATCH_KEYS = 12;
 const MAX_PARTICLES = 700;
 
 /** World pixel of a point on the map (fi, fj in tiles). */
@@ -75,7 +89,7 @@ class Mover {
   update(dt) {
     if (this.wait > 0) this.wait -= dt;
     else if (!this.arrived) {
-      this.t += this.speed * dt;
+      this.t += this.speed * PACE * dt;
       while (this.t >= 1 && !this.arrived) {
         this.t -= 1;
         this.seg++;
@@ -117,13 +131,16 @@ class Mover {
   draw(ctx, time) {
     const s = this.sprite(time);
     const [x, y] = W(this.fi, this.fj);
-    ctx.drawImage(s.img, Math.round(x - s.ax), Math.round(y - s.ay));
+    const X = Math.round(x - s.ax),
+      Y = Math.round(y - s.ay);
+    if (this.talker?.talking) glow(ctx, s, X, Y, time);
+    ctx.drawImage(this.ambient && this.view.dim ? dimmed(s) : s.img, X, Y);
   }
 
   box(time) {
     const s = this.sprite(time);
     const [x, y] = W(this.fi, this.fj);
-    return [x - s.ax, y - s.ay, s.w, s.h];
+    return [x - s.ax - 2, y - s.ay - 2, s.w + 4, s.h + 4];
   }
 }
 
@@ -151,7 +168,7 @@ class Thing {
   draw(ctx, time) {
     const s = this.spriteFn(time, this);
     const [x, y] = W(this.fi, this.fj);
-    ctx.drawImage(s.img, Math.round(x - s.ax), Math.round(y - s.ay - this.alt));
+    ctx.drawImage(this.ambient && this.view.dim ? dimmed(s) : s.img, Math.round(x - s.ax), Math.round(y - s.ay - this.alt));
   }
 
   box(time) {
@@ -211,7 +228,8 @@ class Flames {
 
   box() {
     const [cx, top] = this.top();
-    return [cx - 9, top - 10, 18, 16];
+    // The flames above the roof, and the windows glowing below it.
+    return [cx - 9, top - 12, 18, 26];
   }
 }
 
@@ -233,9 +251,9 @@ class Flyer {
   }
 
   update(dt) {
-    this.fi += this.vi * dt;
-    this.fj += this.vj * dt;
-    this.alt = Math.max(0, this.alt + this.valt * dt);
+    this.fi += this.vi * PACE * dt;
+    this.fj += this.vj * PACE * dt;
+    this.alt = Math.max(0, this.alt + this.valt * PACE * dt);
     this.ttl -= dt;
     this.tick?.(this, dt);
     const N = this.view.city.N;
@@ -296,7 +314,7 @@ class Train {
       const want = toStop < 4 ? Math.max(0.6, toStop * 1.1) : this.max;
       this.speed += Math.sign(want - this.speed) * Math.min(Math.abs(want - this.speed), dt * 2.5);
     }
-    this.i += this.speed * this.dir * dt;
+    this.i += this.speed * this.dir * PACE * dt;
     this.parts = [];
     for (let k = 0; k < this.cars; k++) {
       const ci = this.i - k * this.dir * 1.0;
@@ -333,7 +351,12 @@ export class CityView {
     this.talk = new Map();
     this.timers = [];
     this.cows = [];
+    /** Radios heard on the air, by unit: what each is in town. */
+    this.talkers = new Map();
     this.flick = 0;
+    const look = opts.look?.() ?? {};
+    this.traffic = look.traffic ?? "light";
+    this.dim = look.dim ?? true;
     this.nextWhimsy = chaos.range(...(opts.whimsyFirst ?? [25, 80]));
     this.buildLayer();
     this.spawnAmbient();
@@ -429,9 +452,14 @@ export class CityView {
       }
       return o;
     });
-    objs.sort((a, b) => a.depth - b.depth || a.i - b.i);
+    // Back to front. Where depths tie, a 2 × 2 building goes first: the
+    // 1 × 1 ones beside its front corner are in front of it.
+    objs.sort((a, b) => a.depth - b.depth || b.fp - a.fp || a.i - b.i);
+    objs.forEach((o, n) => (o.order = n));
     for (const o of objs) g.drawImage(o.spr.img, this.ox + o.wx, this.oy + o.wy);
     this.layer = layer;
+    // The same, quieter: what's on the radio is drawn at full strength over it.
+    this.layerDim = dimCopy(layer, layer.width, layer.height);
     // Chimneys that smoke.
     this.stacks = [];
     for (const o of city.objects) {
@@ -444,26 +472,47 @@ export class CityView {
   // ── Ambient life: traffic and cows ─────────────────────────────────────────
 
   spawnAmbient() {
+    this.traffic_();
+    for (let n = 0; n < Math.min(6, Math.ceil(this.city.pasture.length / 3)); n++) {
+      const cow = this.addCow();
+      if (cow) cow.ambient = true;
+    }
+  }
+
+  /** As much background traffic as `this.traffic` says: "none", "light" or "normal". */
+  traffic_() {
     const { city } = this;
     const roads = city.roadTiles.filter((k) => !city.bridge[k]);
     if (!roads.length) return;
-    const cars = Math.max(4, Math.min(36, Math.round(roads.length / 11)));
-    for (let n = 0; n < cars; n++) {
+    const want = { none: 0, light: Math.max(2, Math.min(8, Math.round(roads.length / 45))), normal: Math.max(4, Math.min(36, Math.round(roads.length / 11))) }[this.traffic] ?? 0;
+    const cars = this.ents.filter((e) => e.ambient && e instanceof Mover && e.kind !== "bus");
+    for (const m of cars.slice(want)) m.alive = false;
+    for (let n = cars.length; n < want; n++) {
       const m = new Mover(this, chaos.chance(0.08) ? "taxi" : "car", chaos.pick(roads), { color: chaos.int(S.carColors), speed: chaos.range(1.6, 2.6) });
       m.ambient = true;
       this.wander(m);
       this.ents.push(m);
     }
+    const buses = this.ents.filter((e) => e.ambient && e instanceof Mover && e.kind === "bus");
     const depot = city.facilities.find((f) => f.art[0] === "busDepot");
-    if (depot)
-      for (let n = 0; n < 2; n++) {
-        const m = new Mover(this, "bus", this.door(depot), { speed: 1.5 });
-        m.ambient = true;
-        m.wait = n * 6;
-        this.wander(m, 18);
-        this.ents.push(m);
-      }
-    for (let n = 0; n < Math.min(6, Math.ceil(city.pasture.length / 3)); n++) this.addCow();
+    const wantBuses = depot && this.traffic === "normal" ? 2 : 0;
+    for (const m of buses.slice(wantBuses)) m.alive = false;
+    for (let n = buses.length; n < wantBuses; n++) {
+      const m = new Mover(this, "bus", this.door(depot), { speed: 1.5 });
+      m.ambient = true;
+      m.wait = n * 6;
+      this.wander(m, 18);
+      this.ents.push(m);
+    }
+  }
+
+  /** How it looks: { traffic: "none" | "light" | "normal", dim: the city quieter than the radio }. */
+  setLook(look) {
+    this.dim = !!look.dim;
+    if (look.traffic && look.traffic !== this.traffic) {
+      this.traffic = look.traffic;
+      this.traffic_();
+    }
   }
 
   wander(m, reach = 12) {
@@ -557,9 +606,13 @@ export class CityView {
     const scen = pickScenario(ev.type, ev.flavor, chaos());
     const home = city.tgHome.get(ev.tg) ?? city.hall ?? city.facilities[0];
     const target = this.findTarget(scen.at, home);
-    const inc = { id: `${ev.tg}:${ev.callId}`, type: ev.type, scen, ev, home, target, born: this.time, last: this.time, count: 1, tgs: new Set([ev.tg]), units: [], fx: [], over: false };
+    const inc = { id: `${ev.tg}:${ev.callId}`, type: ev.type, scen, ev, home, target, born: this.time, last: this.time, count: 1, tgs: new Set([ev.tg]), units: [], fx: [], talkers: new Set(), over: false };
     this.incidents.push(inc);
-    this.play(inc);
+    if (scen.act === "respond" && target) this.addFx(inc, scen.fx);
+    // The radios that talk on it are its responders. Where a system doesn't
+    // say who's talking, stand-ins go instead.
+    if (UNIT_ACTS.has(scen.act)) this.later(UNIT_WAIT_S, () => !inc.over && !inc.talkers.size && this.play(inc));
+    else this.play(inc);
     const fill = {
       street: target?.street ?? city.streetAt(home?.i ?? 0, home?.j ?? 0),
       place: target?.name ?? home?.name ?? "town",
@@ -656,7 +709,6 @@ export class CityView {
     switch (scen.act) {
       case "respond":
         units.forEach((u, n) => this.dispatch(inc, u, n * 1.2));
-        if (target) this.addFx(inc, scen.fx);
         break;
       case "ambulance": {
         const m = this.dispatch(inc, "ambulance");
@@ -840,7 +892,7 @@ export class CityView {
           cj = rj + 0.5;
         const d = new Thing(this, (t, me) => S.vehicle("dog", me.axis ?? 0), ci, cj, {
           tick: (me) => {
-            const a = this.time * 1.7;
+            const a = this.time * 1.1;
             me.fi = ci + Math.cos(a) * 0.9;
             me.fj = cj + Math.sin(a) * 0.9;
             me.axis = Math.abs(Math.sin(a)) > 0.7 ? 0 : 1;
@@ -862,7 +914,7 @@ export class CityView {
   reinforce(inc) {
     const { scen } = inc;
     if (inc.over) return;
-    if (["respond", "convoy"].includes(scen.act) && inc.units.filter((u) => u.alive).length < 5 && scen.units.length) this.dispatch(inc, chaos.pick(scen.units), 0, scen.act === "convoy" ? null : inc.home);
+    if (["respond", "convoy"].includes(scen.act) && !inc.talkers.size && inc.units.length && inc.units.filter((u) => u.alive).length < 5 && scen.units.length) this.dispatch(inc, chaos.pick(scen.units), 0, scen.act === "convoy" ? null : inc.home);
     if (scen.fx === "fire") inc.spray = true;
     if (scen.act === "train" && this.trains.length < 3) this.trains.push(new Train(this, chaos.pick(this.city.stations)?.i ?? null));
     if (scen.act === "plane" && chaos.chance(0.5)) this.takeoff();
@@ -886,6 +938,155 @@ export class CityView {
     if (inc.heli) inc.heli.leave();
     for (const p of inc.crowd ?? []) p.alive = false;
     if (inc.mower) inc.mower.alive = false;
+  }
+
+  // ── Talkers: each radio on the air is something in town ────────────────────
+  //
+  // A unit heard on a talkgroup becomes a vehicle of that talkgroup's kind (a
+  // patrol car on a police talkgroup, an engine on a fire one), out from the
+  // talkgroup's home to whatever its talkgroup is busy with. A dispatcher is
+  // its building. It glows while it talks, with its name over it, and stays
+  // in town a while after; then it goes home.
+
+  /** Unit `unit` is talking on `ev`'s talkgroup; `name` is its alias, or "". */
+  talker(ev, unit, name) {
+    let t = this.talkers.get(unit);
+    if (!t) {
+      if (this.talkers.size >= MAX_TALKERS) {
+        // The one heard longest ago makes room.
+        const old = [...this.talkers.values()].filter((x) => !x.talking).sort((a, b) => a.heard - b.heard)[0];
+        if (old) this.retire(old);
+      }
+      t = { unit, name: "", tg: null, inc: null, heard: this.time, talking: false, keys: [], calls: new Map(), tgs: new Map() };
+      this.talkers.set(unit, t);
+    }
+    if (name) t.name = name;
+    // A new transmission (a call it hasn't been on): count it, and see
+    // whether this is a dispatcher. A console can be on several calls at once.
+    if (!t.calls.has(ev.callId)) {
+      t.calls.set(ev.callId, this.time);
+      for (const [id, when] of t.calls) if (this.time - when > 600) t.calls.delete(id);
+      t.keys = [...t.calls.values()];
+      t.tgs.set(ev.tg, this.time);
+      for (const [tg, when] of t.tgs) if (this.time - when > 900) t.tgs.delete(tg);
+      if (t.kind && t.kind !== "building" && (t.tgs.size >= DISPATCH_TGS || t.keys.length >= DISPATCH_KEYS)) {
+        t.kind = "building";
+        if (t.mover?.alive) {
+          const m = t.mover;
+          m.go(m.home, () => (m.alive = false));
+          m.talker = null;
+        }
+        t.mover = null;
+        t.tg = null; // so it's placed again, as its building
+      }
+    }
+    t.heard = this.time;
+    t.talking = true;
+    t.ev = ev;
+    const inc = this.talk.get(ev.tg)?.inc;
+    const fresh = inc && !inc.over ? inc : null;
+    if (fresh) fresh.talkers.add(unit);
+    if (t.tg !== ev.tg || t.inc !== fresh || t.leaving) {
+      t.tg = ev.tg;
+      t.inc = fresh;
+      this.send(t);
+    }
+  }
+
+  /** Unit `unit` stopped talking. */
+  quiet(unit) {
+    const t = this.talkers.get(unit);
+    if (!t) return;
+    t.talking = false;
+    t.heard = this.time;
+  }
+
+  send(t) {
+    const { city } = this;
+    const ev = t.ev;
+    const home = city.tgHome.get(ev.tg) ?? city.hall;
+    const inc = t.inc;
+    t.kind ??= talkerKind(ev, t.name);
+    t.leaving = false;
+    t.home = home;
+    if (t.kind === "train") {
+      if (city.railJ < 0 || !city.stations.length) t.kind = "building";
+      else if (!t.train?.alive) {
+        // A busy railway: the station speaks for the rest.
+        if (this.trains.length >= 3) return void (t.building = home);
+        const st = home?.art?.[0] === "station" ? home : chaos.pick(city.stations);
+        t.train = new Train(this, st.i);
+        t.train.talker = t;
+        this.trains.push(t.train);
+        t.building = null;
+        return;
+      } else return;
+    }
+    if (t.kind === "building") return void (t.building = home);
+    let m = t.mover;
+    if (!m?.alive) {
+      const door = home ? this.door(home) : -1;
+      const start = door >= 0 ? door : chaos.pick(city.gates.length ? city.gates : city.roadTiles);
+      m = new Mover(this, t.kind, start, { speed: S.FLASHING.has(t.kind) ? 2.8 : 2.0, color: chaos.int(S.carColors) });
+      m.talker = t;
+      m.home = start;
+      t.mover = m;
+      this.ents.push(m);
+    }
+    const act = inc?.scen.act;
+    if (inc && inc.target?.road >= 0 && !["bus", "route", "patrol", "train", "plane", "tower"].includes(act)) {
+      m.go(inc.target.road, () => {
+        m.onScene = true;
+        if (act === "ambulance") {
+          // To the nearest hospital, and wait there.
+          m.wait = 6;
+          const hosp = city.facilities.filter((f) => f.type === "hospital");
+          const tg = inc.target;
+          const h = hosp.sort((a, b) => Math.hypot(a.i - tg.i, a.j - tg.j) - Math.hypot(b.i - tg.i, b.j - tg.j))[0];
+          if (h) m.go(this.door(h));
+        }
+      });
+    } else if (["bus", "route", "patrol"].includes(act)) this.route(m, 3, () => this.park(m, home));
+    else this.park(m, home);
+  }
+
+  /** `m` waits on a street near `home`. */
+  park(m, home) {
+    const { city } = this;
+    const [i, j] = home ? [home.i, home.j] : tileOf(city, m.tile);
+    const near = city.roadTiles.filter((k) => !city.bridge[k] && Math.abs(Math.floor(k / city.N) - i) + Math.abs((k % city.N) - j) <= 5);
+    if (near.length) m.go(chaos.pick(near));
+  }
+
+  retire(t) {
+    t.leaving = true;
+    const m = t.mover;
+    if (m?.alive)
+      m.go(m.home, () => {
+        m.alive = false;
+        if (this.talkers.get(t.unit) === t && t.leaving) this.talkers.delete(t.unit);
+      });
+    else this.talkers.delete(t.unit);
+  }
+
+  /** Where a talker is drawn: its vehicle, its train, or its building. */
+  talkerAt(t) {
+    if (t.mover?.alive) {
+      const s = t.mover.sprite(this.time);
+      const [x, y] = W(t.mover.fi, t.mover.fj);
+      return { x, y: y - s.ay, box: t.mover.box(this.time) };
+    }
+    const lead = t.train?.alive && t.train.parts[0];
+    if (lead) {
+      const N = this.city.N;
+      if (lead.fi < 0.5 || lead.fi > N - 0.5) return null;
+      const s = S.vehicle("train", 0, 0, 0);
+      const [x, y] = W(lead.fi, lead.fj);
+      return { x, y: y - s.ay, box: [x - s.ax, y - s.ay, s.w, s.h] };
+    }
+    const o = t.building;
+    if (o?.spr) return { x: o.wx + o.spr.ax, y: o.wy + o.spr.top, box: [o.wx, o.wy, o.spr.w, o.spr.h] };
+    return null;
   }
 
   // ── Little plays ───────────────────────────────────────────────────────────
@@ -1002,7 +1203,7 @@ export class CityView {
       cj = t.j + 0.5;
     inc.mower = new Thing(this, (time, me) => S.vehicle("mower", me.axis ?? 0), ci, cj, {
       tick: (me) => {
-        const a = this.time * 0.6;
+        const a = this.time * 0.4;
         const row = Math.floor(a) % 4;
         const f = a % 1;
         me.axis = 0;
@@ -1019,7 +1220,7 @@ export class CityView {
       const d = new Thing(this, () => S.vehicle(n ? "duckling" : "duck", 1), ri + 0.5, rj - 0.2 - n * 0.12, {
         ttl: 30,
         tick: (me, dt) => {
-          me.fj += dt * 0.1;
+          me.fj += dt * 0.07;
           if (me.fj > rj + 1.3) me.alive = false;
         },
       });
@@ -1189,8 +1390,17 @@ export class CityView {
     }
     this.incidents = this.incidents.filter((inc) => !inc.over || t - inc.last < HOLD_S + 30);
 
-    // Chimneys.
-    for (const [x, y] of this.stacks) if (chaos() < dt * 1.2) this.puff(x, y, { color: 0xd0d0d0, size: 2, vy: -5, vx: 2.5, life: 4 });
+    // Talkers: lights while they talk or their incident is on; home after a while quiet.
+    for (const tk of this.talkers.values()) {
+      const m = tk.mover;
+      if (m?.alive) m.lights = S.FLASHING.has(m.kind) && (tk.talking || !!(tk.inc && !tk.inc.over && tk.inc.live));
+      if (!tk.talking && !tk.leaving && t - tk.heard > RECENT_S) this.retire(tk);
+      if (tk.train && !tk.train.alive) tk.train = null;
+    }
+
+    // Chimneys (fewer puffs when the city's quiet).
+    const smoke = this.traffic === "normal" ? 1.2 : 0.4;
+    for (const [x, y] of this.stacks) if (chaos() < dt * smoke) this.puff(x, y, { color: 0xd0d0d0, size: 2, vy: -5, vx: 2.5, life: 4 });
 
     if (this.opts.whimsy?.() !== false && t > this.nextWhimsy) {
       this.whimsy();
@@ -1327,7 +1537,7 @@ export class CityView {
     ctx.imageSmoothingEnabled = false;
     ctx.fillStyle = "#1c2a1c";
     ctx.fillRect(0, 0, w, h);
-    ctx.drawImage(this.layer, vx + this.ox, vy + this.oy, w, h, 0, 0, w, h);
+    ctx.drawImage(this.dim ? this.layerDim : this.layer, vx + this.ox, vy + this.oy, w, h, 0, 0, w, h);
     ctx.save();
     ctx.translate(-vx, -vy);
     const t = this.time;
@@ -1345,9 +1555,29 @@ export class CityView {
     // Shadows of things in the air.
     for (const f of this.flyers) f.drawShadow(ctx);
 
-    // Everything on the ground, with the buildings in front of it.
+    // Everything on the ground, with the buildings in front of it drawn
+    // again over it, then the buildings in front of those, and so on: a
+    // building drawn again without the ones in front of it would jump
+    // ahead of them.
     const list = [];
     const seen = new Set();
+    const queue = [];
+    const inFront = (bx, by, bw, bh, i0, j0, reach, after) => {
+      for (let a = 0; a <= reach; a++)
+        for (let b = 0; b <= reach; b++) {
+          const i = i0 + a,
+            j = j0 + b;
+          if (i < 0 || j < 0 || i >= N || j >= N) continue;
+          const id = city.obj[i * N + j];
+          if (id < 0 || seen.has(id)) continue;
+          const o = city.objects[id];
+          if (!after(o)) continue;
+          if (o.wx > bx + bw || o.wx + o.spr.w < bx || o.wy > by + bh || o.wy + o.spr.h < by) continue;
+          seen.add(id);
+          queue.push(o);
+          list.push({ depth: o.depth, order: o.order, draw: (c) => c.drawImage(this.dim ? dimmed(o.spr) : o.spr.img, o.wx, o.wy) });
+        }
+    };
     const ground = [...this.ents];
     for (const tr of this.trains)
       for (const p of tr.parts) {
@@ -1355,10 +1585,14 @@ export class CityView {
           depth: p.depth,
           fi: p.fi,
           fj: p.fj,
+          long: true,
           draw: (c) => {
             const s = S.vehicle("train", 0, 0, 0);
             const [x, y] = W(p.fi, p.fj);
-            c.drawImage(s.img, Math.round(x - s.ax), Math.round(y - s.ay));
+            const X = Math.round(x - s.ax),
+              Y = Math.round(y - s.ay);
+            if (tr.talker?.talking) glow(c, s, X, Y, t);
+            c.drawImage(s.img, X, Y);
           },
           box: () => {
             const s = S.vehicle("train", 0, 0, 0);
@@ -1367,28 +1601,38 @@ export class CityView {
           },
         });
       }
+    // Buildings whose radios are talking: lit up, at full strength.
+    for (const tk of this.talkers.values()) {
+      const o = tk.building;
+      if (!o?.spr || !tk.talking) continue;
+      ground.push({
+        depth: o.depth + 0.0005,
+        fi: o.i + o.fp - 0.5,
+        fj: o.j + o.fp - 0.5,
+        draw: (c) => {
+          glow(c, o.spr, o.wx, o.wy, t);
+          c.drawImage(o.spr.img, o.wx, o.wy);
+        },
+        box: () => [o.wx - 2, o.wy - 2, o.spr.w + 4, o.spr.h + 4],
+      });
+    }
     for (const e of ground) {
+      // Off the map there's no ground to stand on: a train coming in is
+      // seen from where the rails begin.
+      const edge = e.long ? 0.5 : 0.15;
+      if (e.fi < edge || e.fj < edge || e.fi > N - edge || e.fj > N - edge) continue;
       const [x, y] = W(e.fi, e.fj);
       if (!inView(x, y)) continue;
       list.push(e);
       const [bx, by, bw, bh] = e.box(t);
-      const i0 = Math.floor(e.fi),
-        j0 = Math.floor(e.fj);
-      for (let a = 0; a <= 6; a++)
-        for (let b = 0; b <= 6; b++) {
-          const i = i0 + a,
-            j = j0 + b;
-          if (i < 0 || j < 0 || i >= N || j >= N) continue;
-          const id = city.obj[i * N + j];
-          if (id < 0 || seen.has(id)) continue;
-          const o = city.objects[id];
-          if (o.depth <= e.depth) continue;
-          if (o.wx > bx + bw || o.wx + o.spr.w < bx || o.wy > by + bh || o.wy + o.spr.h < by) continue;
-          seen.add(id);
-          list.push({ depth: o.depth, draw: (c) => c.drawImage(o.spr.img, o.wx, o.wy) });
-        }
+      inFront(bx, by, bw, bh, Math.floor(e.fi), Math.floor(e.fj), 6, (o) => o.depth > e.depth);
     }
-    list.sort((a, b) => a.depth - b.depth);
+    while (queue.length) {
+      const o = queue.pop();
+      // A tower can stand in front of another from up to nine tiles away.
+      inFront(o.wx, o.wy, o.spr.w, o.spr.h, o.i, o.j, 9, (p) => p.order > o.order);
+    }
+    list.sort((a, b) => a.depth - b.depth || (a.order ?? -1) - (b.order ?? -1));
     for (const e of list) e.draw(ctx, t);
 
     // Smoke, water, sparks.
@@ -1455,6 +1699,29 @@ export class CityView {
       const bob = Math.round(Math.sin(t * 3 + inc.born) * 1.2);
       ctx.drawImage(s.img, Math.round(x - s.ax), Math.round(y - s.ay + bob));
       this.icons.push({ inc, x: x - s.ax, y: y - s.ay, w: s.w, h: s.h });
+    }
+    // Names over the radios talking (and for a moment after, to be read).
+    const taken = [];
+    const ids = this.opts.unitIds?.() ?? false;
+    // A building's latest radio speaks for it: one bubble each.
+    const latest = new Map();
+    for (const tk of this.talkers.values()) if (tk.building && (tk.talking || t - tk.heard <= 2.5) && !(latest.get(tk.building)?.heard > tk.heard)) latest.set(tk.building, tk);
+    for (const tk of [...this.talkers.values()].sort((a, b) => a.heard - b.heard)) {
+      if (!tk.talking && t - tk.heard > 2.5) continue;
+      if (tk.building && latest.get(tk.building) !== tk) continue;
+      const text = tk.name || (ids ? `ID ${tk.unit}` : "");
+      if (!text) continue;
+      const at = this.talkerAt(tk);
+      if (!at || !inView(at.x, at.y, 40)) continue;
+      const b = bubble(text);
+      let x = Math.round(at.x - b.ax),
+        y = Math.round(at.y - 3 - b.ay);
+      // Out of each other's way: step up.
+      for (let n = 0; n < 6 && taken.some((r) => x < r[0] + r[2] && x + b.w > r[0] && y < r[1] + r[3] && y + b.h > r[1]); n++) y -= b.h - 2;
+      taken.push([x, y, b.w, b.h]);
+      ctx.globalAlpha = tk.talking ? 1 : 0.6;
+      ctx.drawImage(b.img, x, y);
+      ctx.globalAlpha = 1;
     }
     ctx.restore();
   }
@@ -1559,6 +1826,11 @@ export class CityView {
   pick(clientX, clientY) {
     const [x, y] = this.toWorld(clientX, clientY);
     for (const ic of this.icons ?? []) if (x >= ic.x && x < ic.x + ic.w && y >= ic.y && y < ic.y + ic.h) return { incident: ic.inc };
+    for (const tk of this.talkers.values()) {
+      if (tk.building) continue; // its building answers below
+      const at = this.talkerAt(tk);
+      if (at && x >= at.box[0] && x < at.box[0] + at.box[2] && y >= at.box[1] && y < at.box[1] + at.box[3]) return { talker: tk, time: this.time };
+    }
     let best = null;
     for (const o of this.city.facilities) {
       if (!o.spr) continue;
@@ -1568,7 +1840,9 @@ export class CityView {
       if (!opaque(o.spr, px, py)) continue;
       if (!best || o.depth > best.depth) best = o;
     }
-    return best ? { facility: best, talking: this.talking().has(best) } : null;
+    if (!best) return null;
+    const radios = [...this.talkers.values()].filter((tk) => tk.building === best).sort((a, b) => b.heard - a.heard);
+    return { facility: best, talking: this.talking().has(best), radios, time: this.time };
   }
 
   destroy() {
@@ -1583,6 +1857,120 @@ export class CityView {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+// Dispatchers and consoles: a building, not a vehicle.
+const DISPATCH = /\b(disp(atch(er)?)?|dsp|console|cad|comms?|communications|911|psap|ecc|ouc|base|control)\b/i;
+
+/** What a radio is in town, from its talkgroup's type and its name. */
+export function talkerKind(ev, name = "") {
+  if (DISPATCH.test(name)) return "building";
+  const winter = [11, 0, 1, 2].includes(new Date().getMonth());
+  switch (ev.type) {
+    case "fire":
+      if (/\b(truck|ladder|tower|tk|trk|aerial)\b/i.test(name)) return "ladder";
+      if (/\b(medic|amb|ems|ambulance)\b/i.test(name)) return "ambulance";
+      if (/\b(chief|bc|batt\w*|cmdr?|command|marshal)\b/i.test(name)) return "suv";
+      return "engine";
+    case "ems":
+      return "ambulance";
+    case "police":
+      return ev.flavor === "secret" ? "suv" : "police";
+    case "transit":
+      if (ev.flavor === "rail") return "train";
+      return /\b(supv?|supervisor|super)\b/i.test(name) ? "car" : "bus";
+    case "schools":
+      return "schoolbus";
+    case "utilities":
+      return ev.flavor === "power" ? "bucket" : "van";
+    case "publicworks":
+      if (ev.flavor === "sanitation") return "garbage";
+      if (ev.flavor === "snow" && winter) return "plow";
+      if (ev.flavor === "traffic") return "bucket";
+      return "dump";
+    case "animal":
+    case "parks":
+      return "van";
+    case "corrections":
+      return "prison";
+    case "security":
+      return "car";
+    case "military":
+      return "army";
+    case "federal":
+    case "emergency":
+      return "suv";
+    default:
+      // Hospitals, city hall, the airport, the stadium, the rest: their building.
+      return "building";
+  }
+}
+
+/** A glow around sprite `s` drawn at (x, y): pulsing, for a radio that's talking. */
+function glow(ctx, s, x, y, time) {
+  if (!s.halo) {
+    const c = document.createElement("canvas");
+    c.width = s.w + 4;
+    c.height = s.h + 4;
+    const g = c.getContext("2d");
+    for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1], [-2, 0], [2, 0], [0, -2], [0, 2], [-1, -1], [1, 1], [-1, 1], [1, -1]]) g.drawImage(s.img, 2 + dx, 2 + dy);
+    g.globalCompositeOperation = "source-in";
+    g.fillStyle = "#fff27a";
+    g.fillRect(0, 0, c.width, c.height);
+    s.halo = c;
+  }
+  ctx.globalAlpha = 0.55 + 0.45 * Math.sin(time * 7);
+  ctx.drawImage(s.halo, x - 2, y - 2);
+  ctx.globalAlpha = 1;
+}
+
+/** A canvas, quieter: less color and light. */
+function dimCopy(src, w, h) {
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const g = c.getContext("2d");
+  const filters = "filter" in CanvasRenderingContext2D.prototype;
+  if (filters) g.filter = "saturate(55%) brightness(80%)";
+  g.drawImage(src, 0, 0);
+  if (!filters) {
+    // No filters here: a wash of shade over what's drawn instead.
+    g.globalCompositeOperation = "source-atop";
+    g.fillStyle = "rgba(14,18,34,0.28)";
+    g.fillRect(0, 0, w, h);
+  }
+  return c;
+}
+
+/** Sprite `s`, quieter (kept with it). */
+function dimmed(s) {
+  return (s.dim ??= dimCopy(s.img, s.w, s.h));
+}
+
+/** A speech bubble with `text` in it (the pixel font, capitals), its anchor the tip of its tail. */
+const bubbles = new Map();
+function bubble(text) {
+  text = text.toUpperCase().slice(0, 18);
+  let b = bubbles.get(text);
+  if (b) return b;
+  const w = textWidth(text) + 6,
+    h = 13;
+  const p = new Pix(w, h + 3);
+  p.rect(1, 0, w - 2, h, 0x202020);
+  p.rect(0, 1, w, h - 2, 0x202020);
+  p.rect(1, 1, w - 2, h - 2, 0xfffff4);
+  const mid = Math.floor(w / 2);
+  p.rect(mid - 2, h - 1, 5, 1, 0xfffff4);
+  p.rect(mid - 1, h, 3, 1, 0xfffff4);
+  p.set(mid, h + 1, 0xfffff4);
+  p.set(mid - 3, h - 1, 0x202020), p.set(mid + 3, h - 1, 0x202020);
+  p.set(mid - 2, h, 0x202020), p.set(mid + 2, h, 0x202020);
+  p.set(mid - 1, h + 1, 0x202020), p.set(mid + 1, h + 1, 0x202020);
+  p.set(mid, h + 2, 0x202020);
+  bitmapText(p, text, 3, 3, 0x202020);
+  if (bubbles.size > 500) bubbles.clear();
+  bubbles.set(text, (b = sprite(p, mid, h + 2)));
+  return b;
+}
 
 function iconKind(inc) {
   const f = inc.ev?.flavor;
