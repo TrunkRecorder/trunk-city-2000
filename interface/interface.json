@@ -1,0 +1,15 @@
+{
+  "id": "trunk-city-2000",
+  "name": "Trunk City 2000",
+  "version": "0.1.0",
+  "description": "A pixel-art city for each radio system, built from its talkgroups. Every call sends someone out: fire trucks, ambulances, buses, plows. Now and then, a flying saucer comes for a cow.",
+  "api": 1,
+  "access": "listen",
+  "license": "MIT",
+  "repository": "https://github.com/TrunkRecorder/trunk-city-2000",
+  "screenshots": [
+    { "path": "screenshots/main.png", "caption": "A city at work: a fire downtown, police and road crews out, traffic on every street" },
+    { "path": "screenshots/quad.png", "caption": "Four systems at once, each with its own headlines" },
+    { "path": "screenshots/planning.png", "caption": "City Planning: which systems and talkgroups count, and what each one is" }
+  ]
+}

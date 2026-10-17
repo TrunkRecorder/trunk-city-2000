@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Trunk City 2000</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./style.css">
+<script type="module" src="./js/app.js"></script>
+</head>
+<body data-view="single">
+<header class="bar">
+  <h1><canvas id="logo" class="logo" width="89" height="9" role="img" aria-label="Trunk City 2000"></canvas></h1>
+  <nav class="nav" aria-label="Cities">
+    <button type="button" class="bevel" id="prev" aria-label="Previous city">◀</button>
+    <select id="pick" class="bevel" aria-label="City"></select>
+    <button type="button" class="bevel" id="next" aria-label="Next city">▶</button>
+  </nav>
+  <div class="views" role="group" aria-label="View">
+    <button type="button" class="bevel" id="v1" aria-pressed="true" title="One city (1)">1</button>
+    <button type="button" class="bevel" id="v4" aria-pressed="false" title="Four cities (4)">4</button>
+  </div>
+  <span id="state" class="state">Connecting…</span>
+  <span class="spacer"></span>
+  <button type="button" class="bevel" id="live" aria-pressed="false">🔊 Listen</button>
+  <button type="button" class="bevel" id="settings-btn">City Planning</button>
+</header>
+<div id="stats" class="stats"></div>
+<p id="asleep" class="asleep" hidden></p>
+<p id="demo-note" class="asleep demo" hidden>Demo city: made-up systems and calls. Served by Trunk Recorder Pro, this page shows your own.</p>
+
+<main id="stage" class="stage"></main>
+
+<section id="empty" class="empty" hidden>
+  <h2>No cities yet</h2>
+  <p>A city is built from a system's talkgroup file: its talkgroups' tags and groups, as RadioReference has them, say where the fire stations, the bus depot and the hospital go. None of this recorder's systems has a file with enough in it, or they're all turned off.</p>
+  <p><button type="button" class="bevel" id="empty-settings">City Planning</button> to build one anyway, or <a href="?demo">see the demo city</a>.</p>
+</section>
+
+<div class="zoom" role="group" aria-label="Zoom">
+  <button type="button" class="bevel" id="zin" aria-label="Zoom in" title="Zoom in (+)">+</button>
+  <button type="button" class="bevel" id="zout" aria-label="Zoom out" title="Zoom out (−)">−</button>
+  <button type="button" class="bevel" id="zfit" aria-label="Fit the city" title="Fit (0)">⤢</button>
+</div>
+
+<footer id="ticker" class="ticker">
+  <span class="ticker-label">NEWS</span>
+  <div class="ticker-roll"><p id="news" aria-live="polite"></p></div>
+  <button type="button" class="bevel" id="news-more" aria-expanded="false" aria-controls="newslog">More</button>
+</footer>
+<section id="newslog" class="newslog" hidden aria-label="Headlines">
+  <header><h2>The Trunk City Times</h2><button type="button" class="bevel" id="newslog-close">Close</button></header>
+  <ol id="newslog-list"></ol>
+</section>
+
+<section id="settings" class="settings" hidden></section>
+<div id="tip" class="tip" hidden></div>
+</body>
+</html>

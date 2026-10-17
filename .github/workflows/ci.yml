@@ -1,0 +1,23 @@
+# Test the classifier and the city builder, and package the interface, on
+# every push and pull request, so a broken interface.json (or a screenshot
+# that's missing or too big) shows up here, not when you tag a release.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test test/*.test.mjs
+      - run: .github/package.sh
