@@ -23,6 +23,8 @@ try {
   // Not served by a recorder: the demo is all there is.
 }
 const demo = !api || new URLSearchParams(location.search).has("demo");
+// A system's short name by the number calls and audio carry it as.
+const systemName = api?.systemName ?? ((status, system) => status?.systemNames?.[system] ?? "");
 const esc = api?.escapeHtml ?? ((s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]));
 const $ = (id) => document.getElementById(id);
 
@@ -45,7 +47,7 @@ function loadSystems() {
   const cfg = rec.config;
   if (!cfg) return;
   const list = [
-    ...(cfg.systems ?? []).map((s) => ({ short: s.shortName, name: s.name || s.shortName, kind: s.type, enabled: s.enabled !== false, csv: s.talkgroupsCsv ?? "" })),
+    ...(cfg.systems ?? []).map((s) => ({ short: s.shortName, name: s.name || s.shortName, kind: s.type, enabled: s.enabled !== false, csv: rec.talkgroupFiles?.[s.shortName] ?? "" })),
     ...(cfg.conventional ?? []).map((s) => ({ short: s.shortName, name: s.name || s.shortName, kind: "conventional", enabled: s.enabled !== false, csv: JSON.stringify(s.channels ?? []) })),
   ];
   systems = list.map((s) => {
@@ -483,9 +485,7 @@ rec.on?.("audio", (chunk) => {
 });
 
 function shortOf(system) {
-  const k = api?.conventionalIndex?.(system);
-  if (k != null) return rec.config?.conventional?.[k]?.shortName;
-  return rec.status?.systems?.find((s) => s.index === system)?.shortName;
+  return systemName(rec.status, system);
 }
 
 // ── Full screen ──────────────────────────────────────────────────────────────
@@ -596,10 +596,13 @@ drawLogo();
 
 // ── Running ──────────────────────────────────────────────────────────────────
 
-let configSeen = null;
+let configSeen = null,
+  talkgroupsSeen = null;
 function onChange() {
-  if (rec.config && rec.config !== configSeen) {
+  // (A talkgroup file comes on its own, beside the config.)
+  if (rec.config && (rec.config !== configSeen || rec.talkgroupFiles !== talkgroupsSeen)) {
     configSeen = rec.config;
+    talkgroupsSeen = rec.talkgroupFiles;
     loadSystems();
     layout();
   }
