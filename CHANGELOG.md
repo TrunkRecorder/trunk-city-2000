@@ -1,8 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0]
 
-- For the recorder release after v0.1.15: a system's talkgroup file comes from the recorder on its
+- Needs Trunk Recorder Pro v0.2.0. A system's talkgroup file comes from the recorder on its
   own (`rec.talkgroupFiles`), not inside the config, and the city is rebuilt when it changes. Calls
   and live audio name their system by the recorder's `status.systemNames`.
 
