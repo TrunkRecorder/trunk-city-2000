@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.1]
+
+- Follow stays with the radio it's on until its transmission is over, whoever else keys up
+  meanwhile, then goes on to the next one on the air after a moment. With Listen on, it stays with
+  the radio on the speakers, until the speakers move on to another call; before, a new call (even
+  an encrypted one, with nothing to hear) took it away from the one playing.
+- Dispatchers are found by "Disp" anywhere in a radio's name or the alias heard on the air (DISP1,
+  PD-Disp, FireDispatch, Dispatcher 4), and become their building even when the name comes after
+  the radio was first heard.
+- Fixed: a radio on two calls at once (a patched talkgroup, or a call that hadn't closed yet when
+  it keyed up on another) stuttered in place, sent back and forth between the two each time the
+  recorder updated. It stays with the call it's on until that ends.
+- A vehicle sent somewhere new finishes the stretch of road it's on, instead of jumping back to
+  where the stretch began, and slides over to its new lane.
+
 ## [0.5.0]
 
 - The city is vector art now, drawn at the size it's shown: sharp at any zoom, and more detailed

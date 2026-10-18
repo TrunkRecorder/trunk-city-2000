@@ -32,3 +32,8 @@ test("dispatchers, and talkgroups whose people stay inside, are buildings", () =
   assert.equal(talkerKind(ev("hospital"), "Mercy ER"), "building");
   assert.equal(talkerKind(ev("government"), ""), "building");
 });
+
+test("a name with Disp in it, anywhere, is a dispatcher", () => {
+  for (const name of ["DISP1", "PD-Disp", "FireDispatch", "Dispatcher 4", "SCSO DISP 2", "Fire Disp", "DSP3", "Console 2"]) assert.equal(talkerKind(ev("fire"), name), "building", name);
+  for (const name of ["Display Unit", "Engine 7", "Medic 12", "Car 214"]) assert.notEqual(talkerKind(ev("fire"), name), "building", name);
+});

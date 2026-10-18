@@ -30,7 +30,8 @@ const $ = (id) => document.getElementById(id);
 
 const rec = demo ? new DemoClient(api?.parseTalkgroups ?? parseCsv) : new api.TrunkClient();
 const settings = Store.load();
-const player = !demo && api ? new api.LivePlayer() : null;
+// It plays one call at a time; Follow stays with the radio on it.
+const player = !demo && api ? new api.LivePlayer({ onNowPlaying: (call) => nowPlaying(call) }) : null;
 let live = false;
 
 // ── Systems ──────────────────────────────────────────────────────────────────
@@ -164,7 +165,7 @@ function talker(v, c) {
   if (!view) return;
   if (v.unit != null && v.unit !== unit) view.quiet(v.unit);
   v.unit = unit;
-  view.talker(v.ev, unit, rec.unitName?.(v.short, unit) ?? "");
+  view.talker(v.ev, unit, rec.unitName?.(v.short, unit) ?? "", rec.aliases?.[v.short]?.[unit] ?? "");
 }
 
 function end(v) {
@@ -498,9 +499,13 @@ rec.on?.("audio", (chunk) => {
   const tg = bySystem.get(short)?.tgs.get(chunk.talkgroup);
   if (tg ? !tg.on : !settings.unknown) return;
   player.play(chunk);
-  // Follow goes to the radios you're hearing.
-  cities.get(short)?.view.heard(chunk.talkgroup);
 });
+
+/** The call on the speakers changed (null: none): Follow, in its city, stays with its radio. */
+function nowPlaying(call) {
+  const short = call && live ? shortOf(call.system) : null;
+  for (const [s, c] of cities) c.view.playing(s === short ? { callId: call.callId, tg: call.talkgroup } : null);
+}
 
 function shortOf(system) {
   return systemName(rec.status, system);

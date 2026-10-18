@@ -38,11 +38,11 @@ const CHUNK_PIXELS = 40e6;
 // How long a frame may spend drawing chunks (ms), all cities together; at
 // least one a frame is drawn regardless.
 const CHUNK_MS = 9;
-// Follow: how wide the shot is around a radio (art units), and how long to
-// stay on one, once there, before cutting to the next to key up.
+// Follow: how wide the shot is around a radio (art units), and how long it
+// waits, once the radio it's on stops talking, before going to the next.
 const SHOT_W = 300,
   SHOT_W_BUILDING = 440;
-const SHOT_MIN_S = 8;
+const SHOT_PAUSE_S = 2;
 // After you move the camera yourself, it waits this long before directing again.
 const HANDS_OFF_MS = 12000;
 const HOLD_S = 30; // an incident lasts this long after its talkgroup goes quiet
@@ -119,10 +119,25 @@ class Mover {
 
   /** Off to road tile `to`; `then(mover)` when it's there. */
   go(to, then) {
+    this.onArrive = then ?? null;
+    // Already on its way there: it carries on.
+    if (!this.arrived && this.path.at(-1) === to) return;
     // The way it was facing, for easing into the first turn of the new route.
     this.came = this.dir;
+    // Partway along a stretch of road, it finishes the stretch (turning
+    // round at its end, if it has to), rather than jumping back to where
+    // the stretch began.
+    const a = this.path[this.seg],
+      b = this.path[this.seg + 1];
+    if (!this.arrived && b != null && this.t > 0) {
+      const on = roadPath(this.view.city, b, to);
+      if (on) {
+        this.path = [a, ...on];
+        this.seg = 0;
+        return;
+      }
+    }
     const path = roadPath(this.view.city, this.tile, to);
-    this.onArrive = then ?? null;
     if (!path || path.length < 2) {
       this.path = [to ?? this.tile];
       this.seg = 0;
@@ -155,11 +170,12 @@ class Mover {
         }
       }
     }
-    this.place();
+    this.place(dt);
     return this.alive;
   }
 
-  place() {
+  /** Where it is now; `dt` given, its lane moves toward where it should be rather than jumping there. */
+  place(dt) {
     const N = this.view.city.N;
     const a = this.path[this.seg],
       b = this.path[Math.min(this.seg + 1, this.path.length - 1)];
@@ -178,8 +194,18 @@ class Mover {
     const [d0, d1, k] = this.t < 0.5 ? [prev, this.dir, this.t + 0.5] : [this.dir, next, this.t - 0.5];
     const di = d0[0] + (d1[0] - d0[0]) * k,
       dj = d0[1] + (d1[1] - d0[1]) * k;
-    this.fi = ai + 0.5 + (bi - ai) * this.t - dj * 0.22;
-    this.fj = aj + 0.5 + (bj - aj) * this.t + di * 0.22;
+    // Its place in the lane: when its route changes, the turn ahead may
+    // too, and it slides over to the new side rather than hopping.
+    const oi = -dj * 0.22,
+      oj = di * 0.22;
+    if (dt == null || this.oi == null) [this.oi, this.oj] = [oi, oj];
+    else {
+      const f = Math.min(1, dt * 12);
+      this.oi += (oi - this.oi) * f;
+      this.oj += (oj - this.oj) * f;
+    }
+    this.fi = ai + 0.5 + (bi - ai) * this.t + this.oi;
+    this.fj = aj + 0.5 + (bj - aj) * this.t + this.oj;
     this.depth = this.fi + this.fj;
   }
 
@@ -452,7 +478,8 @@ export class CityView {
     this.follow = !!look.follow;
     this.shot = null;
     this.handsOff = 0;
-    this.audio = null;
+    // The call on the speakers (Listen): { callId, tg }, or null.
+    this.onSpeakers = null;
     this.nextWhimsy = chaos.range(...(opts.whimsyFirst ?? [25, 80]));
     this.buildLayer();
     this.spawnAmbient();
@@ -1035,19 +1062,35 @@ export class CityView {
   // its building. It glows while it talks, with its name over it, and stays
   // in town a while after; then it goes home.
 
-  /** Unit `unit` is talking on `ev`'s talkgroup; `name` is its alias, or "". */
-  talker(ev, unit, name) {
+  /**
+   * Unit `unit` is talking on `ev`'s talkgroup; `name` is its name (from the
+   * unit names, or the alias heard), or ""; `alias`, the alias heard, if
+   * that's not its name.
+   */
+  talker(ev, unit, name, alias = "") {
     let t = this.talkers.get(unit);
+    // On two calls at once (a patch carries one transmission on two
+    // talkgroups; a call it was on hasn't closed yet): it stays with the one
+    // it's on until that ends, instead of being sent back and forth between
+    // them each time the recorder says what's on the air.
+    if (t?.talking && t.ev && t.ev.callId !== ev.callId && this.talk.get(t.ev.tg)?.calls.has(t.ev.callId)) {
+      t.heard = this.time;
+      this.named(t, name, alias);
+      // (So it's still the one heard, if the other call is the one playing.)
+      (t.also ??= new Map()).set(ev.callId, this.time);
+      for (const [id, when] of t.also) if (this.time - when > 600) t.also.delete(id);
+      return;
+    }
     if (!t) {
       if (this.talkers.size >= MAX_TALKERS) {
         // The one heard longest ago makes room.
         const old = [...this.talkers.values()].filter((x) => !x.talking).sort((a, b) => a.heard - b.heard)[0];
         if (old) this.retire(old);
       }
-      t = { unit, name: "", tg: null, inc: null, heard: this.time, talking: false, keys: [], calls: new Map(), tgs: new Map() };
+      t = { unit, name: "", alias: "", tg: null, inc: null, heard: this.time, talking: false, keys: [], calls: new Map(), tgs: new Map() };
       this.talkers.set(unit, t);
     }
-    if (name) t.name = name;
+    this.named(t, name, alias);
     // A new transmission (a call it hasn't been on): count it, and see
     // whether this is a dispatcher. A console can be on several calls at once.
     if (!t.calls.has(ev.callId)) {
@@ -1056,16 +1099,7 @@ export class CityView {
       t.keys = [...t.calls.values()];
       t.tgs.set(ev.tg, this.time);
       for (const [tg, when] of t.tgs) if (this.time - when > 900) t.tgs.delete(tg);
-      if (t.kind && t.kind !== "building" && (t.tgs.size >= DISPATCH_TGS || t.keys.length >= DISPATCH_KEYS)) {
-        t.kind = "building";
-        if (t.mover?.alive) {
-          const m = t.mover;
-          m.go(m.home, () => (m.alive = false));
-          m.talker = null;
-        }
-        t.mover = null;
-        t.tg = null; // so it's placed again, as its building
-      }
+      if (t.tgs.size >= DISPATCH_TGS || t.keys.length >= DISPATCH_KEYS) this.toBuilding(t);
     }
     t.heard = this.time;
     if (!t.talking) t.keyed = this.time;
@@ -1081,6 +1115,26 @@ export class CityView {
     }
   }
 
+  /** Its name and alias, as they're heard; named like a dispatcher, it's its building. */
+  named(t, name, alias) {
+    if (name) t.name = name;
+    if (alias) t.alias = alias;
+    if (DISPATCH.test(`${t.name} ${t.alias}`)) this.toBuilding(t);
+  }
+
+  /** A dispatcher: its building speaks for it, and its vehicle, if it had one, goes home. */
+  toBuilding(t) {
+    if (!t.kind || t.kind === "building") return;
+    t.kind = "building";
+    if (t.mover?.alive) {
+      const m = t.mover;
+      m.go(m.home, () => (m.alive = false));
+      m.talker = null;
+    }
+    t.mover = null;
+    t.tg = null; // so it's placed again, as its building
+  }
+
   /** Unit `unit` stopped talking. */
   quiet(unit) {
     const t = this.talkers.get(unit);
@@ -1094,7 +1148,7 @@ export class CityView {
     const ev = t.ev;
     const home = city.tgHome.get(ev.tg) ?? city.hall;
     const inc = t.inc;
-    t.kind ??= talkerKind(ev, t.name);
+    t.kind ??= talkerKind(ev, `${t.name} ${t.alias}`);
     t.leaving = false;
     t.home = home;
     if (t.kind === "train") {
@@ -1723,36 +1777,48 @@ export class CityView {
     }
   }
 
-  /** Audio from talkgroup `tg` is playing now: Follow prefers its radios. */
-  heard(tg) {
-    this.audio = { tg, at: this.time };
+  /** The call on the speakers now, with Listen on ({ callId, tg }), or null: Follow stays with its radio. */
+  playing(call) {
+    this.onSpeakers = call;
   }
 
+  /** The radio talking on the call on the speakers (the latest, if several have), if it's in town. */
+  heardTalker() {
+    const p = this.onSpeakers;
+    if (!p) return null;
+    let found = null;
+    for (const tk of this.talkers.values()) if ((tk.calls.has(p.callId) || tk.also?.has(p.callId)) && (!found || tk.heard > found.heard)) found = tk;
+    return found && this.talkerAt(found) ? found : null;
+  }
+
+  /**
+   * Who to watch: the radio on the speakers, with Listen on; otherwise the
+   * one it's on, until its transmission's over, whoever else keys up. Then,
+   * after a moment, the next one on the air (a radio out in town before a
+   * dispatcher); and when it's all quiet a while, back to where they've been.
+   */
   direct(dt) {
     const t = this.time;
-    const live = [...this.talkers.values()].filter((tk) => tk.talking && this.talkerAt(tk));
-    const hint = this.audio && t - this.audio.at < 4 ? this.audio.tg : null;
-    // The one being heard, else the one who keyed up last; a radio out in
-    // town before a dispatcher in its building.
-    const score = (tk) => (hint != null && tk.ev?.tg === hint ? 1e6 : 0) + (tk.keyed ?? 0) + (tk.building ? 0 : 20);
-    live.sort((a, b) => score(b) - score(a));
-    const best = live[0] ?? null;
-    const sh = (this.shot ??= { tk: null, since: t, seen: t, fresh: true });
-    const cur = sh.tk;
-    const curOn = !!(cur && cur.talking && this.talkerAt(cur));
-    if (curOn) sh.seen = t;
+    const sh = (this.shot ??= { tk: null, since: t, ended: null, fresh: true });
+    const score = (tk) => (tk.keyed ?? 0) + (tk.building ? 0 : 20);
+    const best = [...this.talkers.values()].filter((tk) => tk.talking && this.talkerAt(tk)).sort((a, b) => score(b) - score(a))[0] ?? null;
+    const heard = this.heardTalker();
+    const cur = sh.tk && this.talkers.get(sh.tk.unit) === sh.tk && this.talkerAt(sh.tk) ? sh.tk : null;
     let next = cur;
-    if (sh.fresh) next = best;
-    else if (cur && !this.talkers.has(cur.unit)) next = best; // gone home
-    else if (best && best !== cur) {
-      // A cut: when the one we're on has stopped, or someone newer's been
-      // talking while we've had a good look.
-      if (!curOn && t - sh.since > 1.2) next = best;
-      else if (curOn && t - sh.since > SHOT_MIN_S && score(best) > score(cur)) next = best;
-    } else if (!best && !curOn && cur && t - sh.seen > 5) next = null; // all quiet: pull back
-    if (next !== cur || sh.fresh) {
+    if (heard) {
+      next = heard;
+      sh.ended = null;
+    } else if (!cur) next = best;
+    else if (cur.talking) sh.ended = null;
+    else {
+      sh.ended ??= t;
+      if (t - sh.ended >= SHOT_PAUSE_S && best) next = best;
+      else if (t - sh.ended >= 5) next = null; // all quiet: pull back
+    }
+    if (next !== sh.tk || sh.fresh) {
       sh.fresh = false;
       sh.tk = next;
+      sh.ended = null;
       this.flyTo(() => this.framing(), null, 1.1);
       // The shot starts when the camera gets there.
       sh.since = t + this.flight.dur;
@@ -2567,8 +2633,10 @@ function zoomPath(p0, p1) {
   };
 }
 
-// Dispatchers and consoles: a building, not a vehicle.
-const DISPATCH = /\b(disp(atch(er)?)?|dsp|console|cad|comms?|communications|911|psap|ecc|ouc|base|control)\b/i;
+// Dispatchers and consoles: a building, not a vehicle. "Disp" anywhere in a
+// name or alias (DISP1, PD-Disp, FireDispatch, Dispatcher 4), or a word like
+// Console or Comms.
+const DISPATCH = /disp(?!lay)|\b(dsp\d*|console|cad|comms?|communications|911|psap|ecc|ouc|base|control)\b/i;
 
 /** What a radio is in town, from its talkgroup's type and its name. */
 export function talkerKind(ev, name = "") {

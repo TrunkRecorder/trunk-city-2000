@@ -43,7 +43,8 @@ It asks for listen access only: it can see and play what the recorder shows, and
   building to whatever that talkgroup is busy with, and waits there. While it's transmitting it
   glows, with its name (its alias, from your unit names or heard on the air) in a bubble over
   it. Radios heard lately stay around for a couple of minutes, then drive home. Dispatchers are
-  their buildings, which light up when they talk: a radio named like one (Dispatch, Console), or
+  their buildings, which light up when they talk: a radio named like one, in its name or the alias
+heard on the air ("Disp" anywhere in it, as in DISP1 or PD-Dispatch; Console; Comms), or
   one that talks on three talkgroups in 15 minutes or keys up a dozen times in 10.
 - **Calls set things going.** A talkgroup's first call starts something; the calls after it
   (dispatch, then units answering) keep it going; it winds down when the talkgroup has been quiet a
@@ -72,9 +73,11 @@ the more there is: siding and shingles, window sills, wheels, a clock on the sch
 the stands.
 
 **🎥 Follow** hands the camera over: it flies to the radio that's on the air, pulling out and
-back in when it's across town, follows it while it talks, and cuts to the next one to key up;
-when everyone's quiet it pulls back to where they've been. A caption at the bottom says who it is
-and on what talkgroup. With **🔊 Listen** on, it goes to the radios you're hearing. Move the camera
+back in when it's across town, and stays with it until its transmission is over, whoever else
+keys up meanwhile; a moment later it goes on to the next one on the air. When everyone's quiet it
+pulls back to where they've been. A caption at the bottom says who it is and on what talkgroup.
+With **🔊 Listen** on, it stays with the radio you're hearing, until the speakers move on to
+another call. Move the camera
 yourself and it waits a few seconds before taking over again. It's made for a wall or a spare
 monitor, in full screen.
 
