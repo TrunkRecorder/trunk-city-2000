@@ -94,7 +94,7 @@ function cityFor(short) {
     whimsy: () => settings.whimsy,
     whimsyEvery: demo ? [30, 90] : [90, 300],
     whimsyFirst: demo ? [6, 20] : [25, 80],
-    look: () => ({ traffic: settings.traffic, dim: settings.dim }),
+    look: () => ({ traffic: settings.traffic, dim: settings.dim, follow: settings.follow }),
     unitIds: () => settings.unitIds,
   });
   cities.set(short, (c = { key, city, view, canvas, last: performance.now() }));
@@ -404,6 +404,22 @@ function zoom(d) {
   for (const s of slots) cities.get(s.short)?.view.zoomBy(d);
 }
 
+// ── Follow: the camera on whoever's talking ──────────────────────────────────
+
+$("follow").addEventListener("click", () => setFollow(!settings.follow));
+
+function setFollow(on) {
+  settings.follow = on;
+  Store.save(settings);
+  for (const c of cities.values()) c.view.setFollow(on);
+  drawFollow();
+}
+
+function drawFollow() {
+  $("follow").setAttribute("aria-pressed", String(settings.follow));
+}
+drawFollow();
+
 // ── Status and figures ───────────────────────────────────────────────────────
 
 function drawState() {
@@ -482,6 +498,8 @@ rec.on?.("audio", (chunk) => {
   const tg = bySystem.get(short)?.tgs.get(chunk.talkgroup);
   if (tg ? !tg.on : !settings.unknown) return;
   player.play(chunk);
+  // Follow goes to the radios you're hearing.
+  cities.get(short)?.view.heard(chunk.talkgroup);
 });
 
 function shortOf(system) {
@@ -546,7 +564,7 @@ $("settings-btn").addEventListener("click", () => {
       // The calls on the air start again under the new choices.
       for (const v of onAir.values()) if (v) end(v);
       onAir.clear();
-      for (const c of cities.values()) c.view.setLook({ traffic: settings.traffic, dim: settings.dim });
+      for (const c of cities.values()) c.view.setLook({ traffic: settings.traffic, dim: settings.dim, follow: settings.follow });
       layout();
     },
     onClose: () => $("settings-btn").focus(),
@@ -565,6 +583,7 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "+" || e.key === "=") zoom(1);
   else if (e.key === "-") zoom(-1);
   else if (e.key === "0") $("zfit").click();
+  else if (e.key === "c" || e.key === "C") setFollow(!settings.follow);
   else if (e.key === "u" && slots[0]) cities.get(slots[0].short)?.view.whimsy("ufo");
   else if ((e.key === "f" || e.key === "F") && canFull) toggleFull();
   else return;
@@ -623,11 +642,14 @@ rec.on("hello", () => {
 
 let lastStats = 0,
   lastHidden = 0;
-// 30 frames a second is plenty for pixel art, and half the work.
+// 30 frames a second is plenty for a city going about its business, and
+// half the work; while the camera's moving (a zoom, a drag, Follow), as
+// many as the screen shows, so it glides.
 const FRAME_MS = 1000 / 30 - 2;
 let lastFrame = 0;
 function loop(now) {
-  if (now - lastFrame < FRAME_MS) return requestAnimationFrame(loop);
+  const moving = slots.some((s) => cities.get(s.short)?.view.busy());
+  if (!moving && now - lastFrame < FRAME_MS) return requestAnimationFrame(loop);
   lastFrame = now;
   for (const s of slots) cities.get(s.short)?.view.frame(now);
   // Cities out of view keep going, slowly, so they're as busy as their radio when you look.

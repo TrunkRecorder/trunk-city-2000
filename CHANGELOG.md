@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0]
+
+- The city is vector art now, drawn at the size it's shown: sharp at any zoom, and more detailed
+  the closer you look (siding, shingles, window frames and sills, brick courses, wheels, grass,
+  the crowd at the stadium). Zooming is smooth: scroll, pinch, or + and − ease in and out, and ⤢
+  flies back to the whole city. Things move smoothly too, no longer on the pixel grid.
+- **🎥 Follow** (or C): the camera flies from one radio on the air to the next, following each
+  while it talks, with a caption saying who it is; when it's quiet, it pulls back to where they've
+  been. With Listen on, it follows the radios you're hearing.
+- The city is drawn in chunks, in the background, the nearest first; the page draws as often as
+  the screen does while the camera moves, and 30 times a second otherwise.
+
 ## [0.4.0]
 
 - Needs Trunk Recorder Pro v0.2.0. A system's talkgroup file comes from the recorder on its

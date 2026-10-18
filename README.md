@@ -1,6 +1,6 @@
 # Trunk City 2000
 
-A pixel-art city for each radio system your
+An isometric city for each radio system your
 [Trunk Recorder Pro](https://github.com/TrunkRecorder/trunk-recorder-pro) records, built from its
 talkgroups. Every call sends something out into town: a call on a fire talkgroup rolls an engine
 and a ladder truck out of the fire station to a house fire, a kitten up a tree or a fender-bender;
@@ -66,7 +66,17 @@ It asks for listen access only: it can see and play what the recorder shows, and
 
 ![Four cities at once](interface/screenshots/quad.png)
 
-Drag to move around, scroll or pinch to zoom, and **⤢** to see the whole city.
+Drag to move around, scroll or pinch to zoom, and **⤢** to see the whole city. The zoom is smooth,
+and the art is drawn at whatever size it's shown, so it's sharp up close, and the closer you look
+the more there is: siding and shingles, window sills, wheels, a clock on the school, the crowd in
+the stands.
+
+**🎥 Follow** hands the camera over: it flies to the radio that's on the air, pulling out and
+back in when it's across town, follows it while it talks, and cuts to the next one to key up;
+when everyone's quiet it pulls back to where they've been. A caption at the bottom says who it is
+and on what talkgroup. With **🔊 Listen** on, it goes to the radios you're hearing. Move the camera
+yourself and it waits a few seconds before taking over again. It's made for a wall or a spare
+monitor, in full screen.
 
 **⛶ Full screen** fills the screen with the city, or the four, for a wall or a spare monitor.
 After a few seconds without a move, the bars and the pointer step aside; move the mouse or press a
@@ -77,6 +87,7 @@ key and they're back.
 | ← → | The previous / next city |
 | 1, 4 | One city, four cities |
 | + − 0 | Zoom in, out, fit |
+| C | Follow whoever's talking |
 | F | Full screen |
 | U | Summon a saucer |
 
@@ -137,9 +148,10 @@ small city and a harbor, and calls coming and going on them.
 ## Working on it
 
 The page is plain HTML, CSS and JavaScript modules: no build step, nothing from the internet.
-Every picture, from the tiles and buildings to the fire trucks and the cows, is drawn in code,
-pixel by pixel ([interface/js/sprites.js](interface/js/sprites.js)). No art is borrowed from other
-games.
+Every picture, from the tiles and buildings to the fire trucks and the cows, is drawn in code as
+vector art ([interface/js/sprites.js](interface/js/sprites.js), with the isometric boxes, roofs
+and cylinders of [interface/js/vec.js](interface/js/vec.js)), with more detail the larger it's
+drawn. No art is borrowed from other games.
 
 | File | |
 |---|---|
@@ -148,7 +160,8 @@ games.
 | `interface/js/citygen.js` | A city from a system's talkgroups |
 | `interface/js/city.js` | Drawing a city and everything moving in it |
 | `interface/js/scenarios.js` | What each kind of call sets going, and the headlines |
-| `interface/js/sprites.js`, `pixel.js` | The art |
+| `interface/js/sprites.js`, `vec.js` | The art, and drawing it in three dimensions |
+| `interface/js/pixel.js` | Colors, and the logo's bitmap font |
 | `interface/js/panel.js` | City Planning |
 | `interface/js/demo.js` | The demo's pretend recorder |
 
@@ -172,8 +185,9 @@ node --test test/*.test.mjs
 
 `node tools/shoot.mjs <url> <file.png>` runs the page in headless Chrome and saves a screenshot,
 printing anything the page logs; `--count 4 --every 2` takes several, to see things move. The
-screenshots in `interface/screenshots/` come from the demo. `tools/occlusion.js` checks, pixel
-for pixel, that buildings hide what's behind them (how to run it is at its top).
+screenshots in `interface/screenshots/` come from the demo; `--scale 2` takes them at twice the
+resolution. `tools/occlusion.js` checks, pixel for pixel, that buildings hide what's behind them
+(how to run it is at its top).
 
 Releasing works as in the
 [interface template](https://github.com/TrunkRecorder/trunk-interface-template#releasing): set

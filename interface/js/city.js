@@ -3,21 +3,48 @@
 // on its route, a helicopter onto the hospital roof — and, now and then, a
 // flying saucer after a cow.
 //
-// The art is drawn at its own resolution and scaled up by a whole number of
-// device pixels, so it stays crisp. The ground and buildings are drawn once,
-// into one big picture; everything that moves is drawn over it each frame,
-// with the buildings in front of it drawn again on top, so a car goes behind
-// a tower rather than over it.
+// The art is vector art (sprites.js), drawn at the scale it's shown, so it's
+// sharp at any zoom and the zoom is smooth. The ground and buildings are
+// drawn into chunks of a few hundred pixels at the nearest power of two
+// above the zoom, in the background, a few each frame; until a chunk's
+// ready, the one from the zoom before stands in, so zooming in, the city
+// sharpens and fills in. Everything that moves is drawn over the chunks each
+// frame, with the buildings in front of it drawn again on top, so a car goes
+// behind a tower rather than over it.
+//
+// With Follow on, the camera directs itself: it flies to whichever radio is
+// on the air (the one being heard, with Listen on), follows it while it
+// talks, and on to the next; when nobody's talking it pulls back to where
+// they've been.
 
 import * as S from "./sprites.js";
-import { css, mix, Pix, bitmapText, textWidth, sprite } from "./pixel.js";
+import { css, mix } from "./pixel.js";
+import { art, blit, raster, scaleFor, small, newCanvas, PAD } from "./vec.js";
 import { G, roadPath, nearestRoad } from "./citygen.js";
 import { DIRS, NW, NE, SE, SW, toTile } from "./iso.js";
 import { chaos } from "./rng.js";
 import { pickScenario, headline, WHIMSY } from "./scenarios.js";
 
 const TALL = 110; // room above the map for the tallest building
-const ZOOMS = [1, 2, 3, 4, 6, 8];
+// The closest you can get: CSS pixels to an art unit (a tile is 32 units across).
+const MAX_ZOOM = 16;
+// A chunk of the ground and buildings: this many device pixels square, and
+// a margin round it, so chunks drawn side by side overlap rather than seam.
+const CHUNK = 512;
+const MARGIN = 2;
+const CHUNK_SIZE = CHUNK + 2 * MARGIN;
+// Chunks kept, all cities together (in pixels: 40M is 160 MB).
+const CHUNK_PIXELS = 40e6;
+// How long a frame may spend drawing chunks (ms), all cities together; at
+// least one a frame is drawn regardless.
+const CHUNK_MS = 9;
+// Follow: how wide the shot is around a radio (art units), and how long to
+// stay on one, once there, before cutting to the next to key up.
+const SHOT_W = 300,
+  SHOT_W_BUILDING = 440;
+const SHOT_MIN_S = 8;
+// After you move the camera yourself, it waits this long before directing again.
+const HANDS_OFF_MS = 12000;
 const HOLD_S = 30; // an incident lasts this long after its talkgroup goes quiet
 // Everything that moves goes at this fraction of the speeds below: the city
 // is for watching, not racing.
@@ -59,19 +86,8 @@ export const TYPE_COLOR = {
 const colorOf = (tk) => TYPE_COLOR[tk?.ev?.type] ?? 0xffffff;
 const MAX_PARTICLES = 700;
 
-/** World pixel of a point on the map (fi, fj in tiles). */
+/** World point (art units) of a point on the map (fi, fj in tiles); things move smoothly, not on a grid. */
 const W = (fi, fj) => [(fi - fj) * 16, (fi + fj) * 8];
-/**
- * The same for something moving, on the pixel grid: rounded along each of
- * the map's axes (8 steps a tile), so along a road it steps 2 across and 1
- * down together, the way isometric pixel art moves, instead of x and y each
- * rounding on frames of their own and the sprite jiggling.
- */
-const P = (fi, fj) => {
-  const a = Math.round(fi * 8),
-    b = Math.round(fj * 8);
-  return [2 * (a - b), a + b];
-};
 const tileOf = (city, k) => [Math.floor(k / city.N), k % city.N];
 
 // ── Things that move ─────────────────────────────────────────────────────────
@@ -174,22 +190,22 @@ class Mover {
 
   draw(ctx, time) {
     const s = this.sprite(time);
-    const [x, y] = P(this.fi, this.fj);
-    const X = Math.round(x - s.ax),
-      Y = Math.round(y - s.ay);
+    const [x, y] = W(this.fi, this.fj);
+    const X = x - s.ax,
+      Y = y - s.ay;
+    const b = this.view.b;
     if (this.talker) {
       // A ring on the ground in its service's color: faint while it's been
       // heard lately, bright and pulsing while it talks.
-      const r = ring(colorOf(this.talker), this.talker.talking && Math.floor(time * 4) % 2 === 0);
-      ctx.drawImage(r.img, Math.round(x) - r.ax, Math.round(y) - r.ay);
+      groundRing(ctx, x, y, colorOf(this.talker), this.talker.talking ? 0.55 + 0.45 * Math.sin(time * 8) : 0);
     }
-    if (this.talker?.talking) glow(ctx, s, X, Y, time);
-    ctx.drawImage(this.ambient && this.view.dim ? dimmed(s) : s.img, X, Y);
+    if (this.talker?.talking) glow(ctx, s, X, Y, time, b);
+    blit(ctx, s, X, Y, b, this.ambient && this.view.dim ? dimmed : null);
   }
 
   box(time) {
     const s = this.sprite(time);
-    const [x, y] = P(this.fi, this.fj);
+    const [x, y] = W(this.fi, this.fj);
     // The sprite and its glow, and the ring under it.
     const x0 = Math.min(x - s.ax - 2, x - 12),
       y0 = y - s.ay - 2;
@@ -220,13 +236,13 @@ class Thing {
 
   draw(ctx, time) {
     const s = this.spriteFn(time, this);
-    const [x, y] = P(this.fi, this.fj);
-    ctx.drawImage(this.ambient && this.view.dim ? dimmed(s) : s.img, Math.round(x - s.ax), Math.round(y - s.ay - this.alt));
+    const [x, y] = W(this.fi, this.fj);
+    blit(ctx, s, x - s.ax, y - s.ay - this.alt, this.view.b, this.ambient && this.view.dim ? dimmed : null);
   }
 
   box(time) {
     const s = this.spriteFn(time, this);
-    const [x, y] = P(this.fi, this.fj);
+    const [x, y] = W(this.fi, this.fj);
     return [x - s.ax, y - s.ay - this.alt, s.w, s.h];
   }
 }
@@ -261,21 +277,32 @@ class Flames {
 
   draw(ctx, time) {
     const [cx, top] = this.top();
-    const n = Math.round(4 + this.heat * 10);
+    const n = Math.round(4 + this.heat * 7);
     const r = this.view.flick;
-    for (let k = 0; k < n; k++) {
-      const x = Math.round(cx - 8 + ((k * 37 + Math.floor(time * 9) * 13) % 17));
-      const h = Math.round((2 + ((k * 7 + Math.floor(time * 11)) % 6)) * this.heat);
-      for (let y = 0; y < h; y++) {
-        ctx.fillStyle = y < h / 3 ? "#ffe060" : y < (2 * h) / 3 ? "#ff8a20" : "#e83a1a";
-        ctx.fillRect(x, Math.round(top + 3 - y + ((k * 3) % 4)), 1, 1);
-      }
-    }
     // Windows glowing.
     if (this.heat > 0.4 && r > 0.3) {
       ctx.fillStyle = "#ffb030";
-      ctx.fillRect(Math.round(cx - 6), Math.round(top + 9), 1, 2);
-      ctx.fillRect(Math.round(cx + 3), Math.round(top + 10), 1, 2);
+      ctx.fillRect(cx - 6, top + 9, 1, 2);
+      ctx.fillRect(cx + 3, top + 10, 1, 2);
+    }
+    // Tongues of flame, licking up and swaying.
+    for (let k = 0; k < n; k++) {
+      const x = cx - 7 + ((k + 0.5) * 14) / n + Math.sin(time * 6 + k * 2.1) * 0.7;
+      const base = top + 3 + ((k * 3) % 4) * 0.6;
+      const h = (3 + 2.2 * Math.sin(time * 9 + k * 1.7) + 1.6 * Math.sin(time * 14.3 + k * 0.9)) * this.heat + 1.5 * this.heat;
+      const w = 1.2 + (k % 3) * 0.35;
+      const sway = Math.sin(time * 7 + k) * 0.9;
+      const gr = ctx.createLinearGradient(0, base, 0, base - h);
+      gr.addColorStop(0, "#e83a1a");
+      gr.addColorStop(0.45, "#ff8a20");
+      gr.addColorStop(1, "#ffe060");
+      ctx.fillStyle = gr;
+      ctx.beginPath();
+      ctx.moveTo(x - w, base);
+      ctx.quadraticCurveTo(x - w * 0.9, base - h * 0.55, x + sway, base - h);
+      ctx.quadraticCurveTo(x + w * 0.9, base - h * 0.55, x + w, base);
+      ctx.closePath();
+      ctx.fill();
     }
   }
 
@@ -316,21 +343,21 @@ class Flyer {
 
   drawShadow(ctx) {
     if (!this.shadow) return;
-    const [x, y] = P(this.fi, this.fj);
+    const [x, y] = W(this.fi, this.fj);
     ctx.fillStyle = "rgba(0,0,0,0.22)";
-    const w = this.shadow;
-    ctx.fillRect(Math.round(x - w), Math.round(y - 1), w * 2, 2);
-    ctx.fillRect(Math.round(x - w + 2), Math.round(y - 2), w * 2 - 4, 4);
+    ctx.beginPath();
+    ctx.ellipse(x, y, this.shadow, this.shadow * 0.36, 0, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   draw(ctx, time) {
     const s = this.spriteFn(time, this);
-    const [x, y] = P(this.fi, this.fj);
-    ctx.drawImage(s.img, Math.round(x - s.ax), Math.round(y - s.ay - this.alt));
+    const [x, y] = W(this.fi, this.fj);
+    blit(ctx, s, x - s.ax, y - s.ay - this.alt, this.view.b);
   }
 
   screen() {
-    const [x, y] = P(this.fi, this.fj);
+    const [x, y] = W(this.fi, this.fj);
     return [x, y - this.alt];
   }
 }
@@ -392,7 +419,17 @@ export class CityView {
     this.opts = opts;
     this.time = 0;
     this.last = null;
-    this.zoom = null; // device pixels per art pixel; null: fit
+    this.uid = ++viewCount;
+    // The camera: centered on (cx, cy), z device pixels to an art unit.
+    // `zoom` is the z the viewer chose; null, the city fits. `zt` and
+    // `anchor`: a zoom on its way, keeping a point where it is; `flight`: a
+    // move from one view to another, zooming out on the way if it's far.
+    this.zoom = null;
+    this.z = 1;
+    this.b = 1;
+    this.zt = null;
+    this.anchor = null;
+    this.flight = null;
     const N = city.N;
     [this.cx, this.cy] = W(N / 2, N / 2);
     this.ents = [];
@@ -410,6 +447,12 @@ export class CityView {
     const look = opts.look?.() ?? {};
     this.traffic = look.traffic ?? "light";
     this.dim = look.dim ?? true;
+    // Follow: the camera goes to whoever's talking. `shot` is what it's
+    // watching; `handsOff` until when it leaves the camera to you.
+    this.follow = !!look.follow;
+    this.shot = null;
+    this.handsOff = 0;
+    this.audio = null;
     this.nextWhimsy = chaos.range(...(opts.whimsyFirst ?? [25, 80]));
     this.buildLayer();
     this.spawnAmbient();
@@ -467,27 +510,20 @@ export class CityView {
     }
   }
 
+  /** Where everything on the ground goes: each tile's picture, and the buildings and trees, back to front. */
   buildLayer() {
     const { city } = this;
     const N = city.N;
-    const layer = document.createElement("canvas");
-    layer.width = N * 32;
-    layer.height = N * 16 + TALL;
-    const g = layer.getContext("2d");
-    g.imageSmoothingEnabled = false;
-    this.ox = N * 16;
-    this.oy = TALL;
     this.water = [];
     this.parks = [];
+    this.tiles = new Array(N * N);
     for (let i = 0; i < N; i++)
       for (let j = 0; j < N; j++) {
-        const s = this.groundSprite(i, j);
-        g.drawImage(s.img, this.ox + (i - j) * 16 - 16, this.oy + (i + j) * 8);
         const k = i * N + j;
+        this.tiles[k] = this.groundSprite(i, j);
         if (city.ground[k] === G.water) this.water.push(k);
         if (city.ground[k] === G.park) this.parks.push(k);
       }
-    // Buildings and trees, back to front.
     const objs = city.objects.map((o) => {
       const [name, seed] = o.art;
       const spr = S[name](seed);
@@ -509,16 +545,13 @@ export class CityView {
     // 1 × 1 ones beside its front corner are in front of it.
     objs.sort((a, b) => a.depth - b.depth || b.fp - a.fp || a.i - b.i);
     objs.forEach((o, n) => (o.order = n));
-    for (const o of objs) g.drawImage(o.spr.img, this.ox + o.wx, this.oy + o.wy);
-    this.layer = layer;
-    // The same, quieter: what's on the radio is drawn at full strength over it.
-    this.layerDim = dimCopy(layer, layer.width, layer.height);
+    this.objs = objs;
     // Chimneys that smoke.
     this.stacks = [];
     for (const o of city.objects) {
       const [x, y] = W(o.i, o.j);
-      if (o.art[0] === "factory") this.stacks.push([x + 10, y - 18]);
-      if (o.art[0] === "powerPlant") this.stacks.push([x + 9, y - 22], [x + 11, y - 23]);
+      if (o.art[0] === "factory") this.stacks.push([x + 10, y - 18.5]);
+      if (o.art[0] === "powerPlant") this.stacks.push([x + 9, y - 22.5], [x + 11, y - 21.5]);
     }
   }
 
@@ -559,9 +592,10 @@ export class CityView {
     }
   }
 
-  /** How it looks: { traffic: "none" | "light" | "normal", dim: the city quieter than the radio }. */
+  /** How it looks: { traffic: "none" | "light" | "normal", dim: the city quieter than the radio, follow: the camera on who's talking }. */
   setLook(look) {
     this.dim = !!look.dim;
+    if ("follow" in look) this.setFollow(look.follow);
     if (look.traffic && look.traffic !== this.traffic) {
       this.traffic = look.traffic;
       this.traffic_();
@@ -889,7 +923,7 @@ export class CityView {
           k.fixed = [o.wx + o.spr.ax, o.wy + o.spr.ay];
           k.draw = (ctx) => {
             const s = S.kittenTree();
-            ctx.drawImage(s.img, Math.round(k.fixed[0] - s.ax), Math.round(k.fixed[1] - s.ay));
+            blit(ctx, s, k.fixed[0] - s.ax, k.fixed[1] - s.ay, this.b);
           };
           k.box = () => {
             const s = S.kittenTree();
@@ -1034,6 +1068,7 @@ export class CityView {
       }
     }
     t.heard = this.time;
+    if (!t.talking) t.keyed = this.time;
     t.talking = true;
     t.ev = ev;
     const inc = this.talk.get(ev.tg)?.inc;
@@ -1136,14 +1171,14 @@ export class CityView {
       // Not drawn off the map, so nothing to label there.
       if (m.fi < 0.15 || m.fj < 0.15 || m.fi > N - 0.15 || m.fj > N - 0.15) return null;
       const s = t.mover.sprite(this.time);
-      const [x, y] = P(t.mover.fi, t.mover.fj);
+      const [x, y] = W(t.mover.fi, t.mover.fj);
       return { x, y: y - s.ay, box: t.mover.box(this.time) };
     }
     const lead = t.train?.alive && t.train.parts[0];
     if (lead) {
       if (lead.fi < 0.5 || lead.fi > N - 0.5) return null;
       const s = S.vehicle("train", 0, 0, 0);
-      const [x, y] = P(lead.fi, lead.fj);
+      const [x, y] = W(lead.fi, lead.fj);
       return { x, y: y - s.ay, box: [x - s.ax, y - s.ay, s.w, s.h] };
     }
     const o = t.building;
@@ -1463,7 +1498,7 @@ export class CityView {
       // A trail of sparkles behind a radio that's talking (fewer while it waits).
       const N = this.city.N;
       if (m?.alive && m.fi > 0.15 && m.fj > 0.15 && m.fi < N - 0.15 && m.fj < N - 0.15 && chaos() < dt * (m.arrived ? 6 : 22)) {
-        const [x, y] = P(m.fi, m.fj);
+        const [x, y] = W(m.fi, m.fj);
         this.puff(x + chaos.range(-3, 3), y - chaos.range(1, 5), { color: chaos.chance(0.6) ? c : 0xffffff, size: 1, vx: chaos.range(-3, 3), vy: chaos.range(-8, -3), life: chaos.range(0.6, 1.1), grow: 0 });
       }
       // Rings from a building whose radio is talking.
@@ -1537,69 +1572,407 @@ export class CityView {
     }
   }
 
-  // ── Drawing ────────────────────────────────────────────────────────────────
+  // ── The camera ─────────────────────────────────────────────────────────────
 
   resize() {
     const rect = this.canvas.parentElement.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     if (!rect.width || !rect.height) return false;
-    if (this.zoom == null) {
-      const span = this.city.N * 32;
-      const dev = rect.width * dpr;
-      this.z = ZOOMS.filter((z) => span * z <= dev * 1.5).pop() ?? 1;
-    } else this.z = this.zoom;
-    const w = Math.ceil((rect.width * dpr) / this.z),
-      h = Math.ceil((rect.height * dpr) / this.z);
+    const w = Math.round(rect.width * dpr),
+      h = Math.round(rect.height * dpr);
     if (this.canvas.width !== w || this.canvas.height !== h) {
       this.canvas.width = w;
       this.canvas.height = h;
-      this.canvas.style.width = `${(w * this.z) / dpr}px`;
-      this.canvas.style.height = `${(h * this.z) / dpr}px`;
+      this.canvas.style.width = `${rect.width}px`;
+      this.canvas.style.height = `${rect.height}px`;
     }
     this.dpr = dpr;
+    // The zoom that shows the whole city.
+    const N = this.city.N;
+    this.fitZ = Math.min((w / (N * 32)) * 1.08, h / (N * 16 + 30));
+    if (!this.placed || (this.zoom == null && !this.flight && this.zt == null && !this.follow)) {
+      this.placed = true;
+      this.z = this.fitZ;
+      [this.cx, this.cy] = W(N / 2, N / 2);
+    }
+    this.z = this.clampZ(this.z);
+    this.b = scaleFor(this.z);
     return true;
   }
 
-  zoomBy(step, at) {
-    const i = ZOOMS.indexOf(this.z);
-    const next = ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, (i < 0 ? 1 : i) + step))];
-    if (next === this.z) return;
-    // Keep the point under the pointer where it is.
-    if (at) {
-      const [wx, wy] = this.toWorld(at[0], at[1]);
-      const k = this.z / next;
-      this.cx = wx - (wx - this.cx) * k;
-      this.cy = wy - (wy - this.cy) * k;
-    }
-    this.zoom = next;
-    this.resize();
+  clampZ(z) {
+    return Math.max((this.fitZ ?? 1) * 0.6, Math.min(MAX_ZOOM * (this.dpr ?? 1), z));
   }
 
-  fit() {
-    this.zoom = null;
-    [this.cx, this.cy] = W(this.city.N / 2, this.city.N / 2);
-    this.resize();
+  /** Client point (x, y), in the canvas's device pixels. */
+  devAt(clientX, clientY) {
+    const r = this.canvas.getBoundingClientRect();
+    return [(clientX - r.left) * this.dpr, (clientY - r.top) * this.dpr];
+  }
+
+  /** The world point at device pixel (sx, sy) of the canvas. */
+  fromDev(sx, sy) {
+    return [this.cx + (sx - this.canvas.width / 2) / this.z, this.cy + (sy - this.canvas.height / 2) / this.z];
   }
 
   toWorld(clientX, clientY) {
-    const r = this.canvas.getBoundingClientRect();
-    const vx = Math.round(this.cx - this.canvas.width / 2),
-      vy = Math.round(this.cy - this.canvas.height / 2);
-    return [vx + ((clientX - r.left) * this.dpr) / this.z, vy + ((clientY - r.top) * this.dpr) / this.z];
+    return this.fromDev(...this.devAt(clientX, clientY));
   }
+
+  /** Zooms smoothly to z, keeping client point `at` (or the middle) where it is. */
+  zoomTo(z, at) {
+    z = this.clampZ(z);
+    const [sx, sy] = at ? this.devAt(at[0], at[1]) : [this.canvas.width / 2, this.canvas.height / 2];
+    const [wx, wy] = this.fromDev(sx, sy);
+    this.anchor = { wx, wy, sx, sy };
+    this.zt = z;
+    this.zoom = z;
+    this.flight = null;
+  }
+
+  zoomBy(step, at) {
+    this.hands();
+    this.zoomTo((this.zt ?? this.z) * Math.pow(1.6, step), at);
+  }
+
+  fit() {
+    this.hands();
+    const N = this.city.N;
+    const [cx, cy] = W(N / 2, N / 2);
+    this.flyTo(
+      () => [cx, cy, this.fitZ],
+      () => (this.zoom = null),
+    );
+  }
+
+  /** The viewer is moving the camera: Follow leaves it to them for a while. */
+  hands() {
+    this.handsOff = performance.now() + HANDS_OFF_MS;
+  }
+
+  /**
+   * Flies the camera to `dest()` → [cx, cy, z] (asked again each frame, so
+   * it can be something moving): out, across and in, if it's far.
+   */
+  flyTo(dest, then = null, slow = 1) {
+    this.zt = null;
+    this.anchor = null;
+    const w0 = this.canvas.width;
+    const p0 = [this.cx, this.cy, w0 / this.z];
+    const [x1, y1, z1] = dest();
+    const S = Math.abs(zoomPath(p0, [x1, y1, w0 / z1]).S);
+    this.flight = { p0, dest, then, t: 0, dur: Math.max(0.7, Math.min(4, (0.5 + S * 0.7) * slow)) };
+  }
+
+  /** Is the camera moving (so it's worth drawing more often)? */
+  busy() {
+    return this.follow || !!this.flight || this.zt != null || this.dragging;
+  }
+
+  camera(dt) {
+    const w0 = this.canvas.width,
+      h0 = this.canvas.height;
+    if (this.follow) {
+      if (performance.now() > this.handsOff) {
+        if (this.wasHands && this.shot) this.shot.fresh = true;
+        this.wasHands = false;
+        this.direct(dt);
+      } else this.wasHands = true;
+    }
+    const f = this.flight;
+    if (f) {
+      f.t += dt;
+      const k = Math.min(1, f.t / f.dur);
+      const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+      const [x1, y1, z1] = f.dest();
+      const [ux, uy, w] = zoomPath(f.p0, [x1, y1, w0 / z1]).at(e);
+      this.cx = ux;
+      this.cy = uy;
+      this.z = this.clampZ(w0 / w);
+      if (k >= 1) {
+        this.flight = null;
+        f.then?.();
+      }
+    } else if (this.zt != null) {
+      const lz = Math.log(this.z),
+        lt = Math.log(this.zt);
+      this.z = Math.abs(lt - lz) < 0.003 ? this.zt : Math.exp(lz + (lt - lz) * (1 - Math.exp(-dt * 14)));
+      const a = this.anchor;
+      if (a) {
+        this.cx = a.wx - (a.sx - w0 / 2) / this.z;
+        this.cy = a.wy - (a.sy - h0 / 2) / this.z;
+      }
+      if (this.z === this.zt) this.zt = this.anchor = null;
+    }
+    this.b = scaleFor(this.z);
+  }
+
+  // ── Follow: the camera directs itself ──────────────────────────────────────
+
+  /** On (or off): follow whoever's talking. */
+  setFollow(on) {
+    on = !!on;
+    if (on === this.follow) return;
+    this.follow = on;
+    this.shot = null;
+    this.handsOff = 0;
+    // Off: the camera stays where it is.
+    if (!on) {
+      this.flight = null;
+      this.zoom = this.z;
+    }
+  }
+
+  /** Audio from talkgroup `tg` is playing now: Follow prefers its radios. */
+  heard(tg) {
+    this.audio = { tg, at: this.time };
+  }
+
+  direct(dt) {
+    const t = this.time;
+    const live = [...this.talkers.values()].filter((tk) => tk.talking && this.talkerAt(tk));
+    const hint = this.audio && t - this.audio.at < 4 ? this.audio.tg : null;
+    // The one being heard, else the one who keyed up last; a radio out in
+    // town before a dispatcher in its building.
+    const score = (tk) => (hint != null && tk.ev?.tg === hint ? 1e6 : 0) + (tk.keyed ?? 0) + (tk.building ? 0 : 20);
+    live.sort((a, b) => score(b) - score(a));
+    const best = live[0] ?? null;
+    const sh = (this.shot ??= { tk: null, since: t, seen: t, fresh: true });
+    const cur = sh.tk;
+    const curOn = !!(cur && cur.talking && this.talkerAt(cur));
+    if (curOn) sh.seen = t;
+    let next = cur;
+    if (sh.fresh) next = best;
+    else if (cur && !this.talkers.has(cur.unit)) next = best; // gone home
+    else if (best && best !== cur) {
+      // A cut: when the one we're on has stopped, or someone newer's been
+      // talking while we've had a good look.
+      if (!curOn && t - sh.since > 1.2) next = best;
+      else if (curOn && t - sh.since > SHOT_MIN_S && score(best) > score(cur)) next = best;
+    } else if (!best && !curOn && cur && t - sh.seen > 5) next = null; // all quiet: pull back
+    if (next !== cur || sh.fresh) {
+      sh.fresh = false;
+      sh.tk = next;
+      this.flyTo(() => this.framing(), null, 1.1);
+      // The shot starts when the camera gets there.
+      sh.since = t + this.flight.dur;
+    }
+    if (!this.flight) {
+      // Hold the shot: keep up with it, easing in a little.
+      const [x, y, z] = this.framing();
+      const k = 1 - Math.exp(-dt * 2.4);
+      this.cx += (x - this.cx) * k;
+      this.cy += (y - this.cy) * k;
+      const lz = Math.log(this.z);
+      this.z = Math.exp(lz + (Math.log(z) - lz) * (1 - Math.exp(-dt * 1.2)));
+    }
+  }
+
+  /** The view for the shot: [cx, cy, z]. */
+  framing() {
+    const w0 = this.canvas.width,
+      h0 = this.canvas.height;
+    const sh = this.shot;
+    const tk = sh?.tk;
+    const at = tk && this.talkerAt(tk);
+    if (!at) return this.overview();
+    let [x0, y0, x1, y1] = [at.box[0], at.box[1], at.box[0] + at.box[2], at.box[1] + at.box[3]];
+    // Others on the air close by are in the shot too.
+    for (const o of this.talkers.values()) {
+      if (o === tk || !o.talking) continue;
+      const a = this.talkerAt(o);
+      if (!a || Math.hypot(a.x - at.x, a.y - at.y) > 120) continue;
+      x0 = Math.min(x0, a.box[0]);
+      y0 = Math.min(y0, a.box[1]);
+      x1 = Math.max(x1, a.box[0] + a.box[2]);
+      y1 = Math.max(y1, a.box[1] + a.box[3]);
+    }
+    let cx = (x0 + x1) / 2,
+      cy = (y0 + y1) / 2 - 6; // room for its name over it
+    // A little ahead of where it's going.
+    const m = tk.mover;
+    if (m?.alive && !m.arrived && !m.wait) {
+      const [lx, ly] = W(m.dir[0], m.dir[1]);
+      cx += lx * 0.9;
+      cy += ly * 0.9;
+    }
+    const push = 1 - 0.1 * Math.min(1, (this.time - sh.since) / 15);
+    const base = (tk.building ? SHOT_W_BUILDING : SHOT_W) * push;
+    const w = Math.min(base * 1.8, Math.max(base, (x1 - x0) * 1.6, (y1 - y0) * 1.6 * (w0 / h0)));
+    return [cx, cy, this.clampZ(w0 / w)];
+  }
+
+  /** Nobody talking: far enough back to see where they've been, drifting. */
+  overview() {
+    const w0 = this.canvas.width,
+      h0 = this.canvas.height;
+    const t = this.time;
+    const N = this.city.N;
+    let x0 = Infinity,
+      y0 = Infinity,
+      x1 = -Infinity,
+      y1 = -Infinity;
+    for (const tk of this.talkers.values()) {
+      if (t - tk.heard > 90) continue;
+      const a = this.talkerAt(tk);
+      if (!a) continue;
+      x0 = Math.min(x0, a.x);
+      y0 = Math.min(y0, a.y);
+      x1 = Math.max(x1, a.x);
+      y1 = Math.max(y1, a.y);
+    }
+    if (x0 === Infinity) {
+      const [cx, cy] = W(N / 2, N / 2);
+      return [cx + Math.sin(t / 37) * N * 3, cy + Math.cos(t / 53) * N * 1.5, this.clampZ(this.fitZ * 1.3)];
+    }
+    const w = Math.max(900, (x1 - x0) * 1.5, (y1 - y0) * 1.5 * (w0 / h0));
+    return [(x0 + x1) / 2 + Math.sin(t / 29) * 24, (y0 + y1) / 2 + Math.cos(t / 41) * 12, this.clampZ(Math.max(this.fitZ * 1.05, w0 / w))];
+  }
+
+  // ── Drawing ────────────────────────────────────────────────────────────────
 
   frame(now) {
     const dt = this.last == null ? 0 : Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
     this.update(dt);
     if (!this.resize()) return;
-    this.render();
+    this.camera(dt);
+    this.render(now);
   }
 
-  render() {
+  /** The ground and buildings in view, from chunks; the ones not drawn yet, a few at a time. */
+  drawChunks(now) {
+    const { ctx, canvas } = this;
+    const z = this.z,
+      b = this.b,
+      S = CHUNK / b;
+    const { vx, vy } = this;
+    const w = canvas.width / z,
+      h = canvas.height / z;
+    const N = this.city.N;
+    const dim = this.dim ? 1 : 0;
+    const key = (ci, cj, d = dim) => `${this.uid}|${d}|${b}|${ci}|${cj}`;
+    const have = [],
+      missing = [];
+    for (let ci = Math.floor(vx / S); ci * S < vx + w; ci++)
+      for (let cj = Math.floor(vy / S); cj * S < vy + h; cj++) {
+        // Only where there's city.
+        if ((ci + 1) * S < -N * 16 - 20 || ci * S > N * 16 + 20 || (cj + 1) * S < -TALL || cj * S > N * 16 + 20) continue;
+        const c = chunks.get(key(ci, cj));
+        if (c) have.push(c);
+        else missing.push([ci, cj]);
+      }
+    if (missing.length) {
+      // Nearest the middle first, as many as there's time for, and one at least.
+      const mx = vx + w / 2,
+        my = vy + h / 2;
+      const far = ([ci, cj]) => Math.hypot((ci + 0.5) * S - mx, (cj + 0.5) * S - my);
+      missing.sort((p, q) => far(p) - far(q));
+      if (chunkClock.now !== now) {
+        chunkClock.now = now;
+        chunkClock.until = performance.now() + CHUNK_MS;
+      }
+      let built = 0;
+      while (missing.length && (!built || performance.now() < chunkClock.until)) {
+        const [ci, cj] = missing.shift();
+        have.push(this.chunk(b, ci, cj, dim, key(ci, cj), key(ci, cj, 0)));
+        built++;
+      }
+    }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    if (missing.length) {
+      // Until they're drawn: what there is at other scales, the nearest last.
+      const others = [];
+      for (const c of chunks.values()) if (c.view === this.uid && c.dim === dim && c.b !== b) others.push(c);
+      const off = (c) => Math.abs(Math.log2(c.b / b));
+      others.sort((p, q) => off(q) - off(p));
+      for (const c of others) this.putChunk(c);
+    }
+    for (const c of have) this.putChunk(c, now);
+  }
+
+  putChunk(c, now) {
+    // Exactly where it goes (so a building drawn again over a car lands
+    // right on itself), with a pixel of its margin over its neighbours'.
+    const z = this.z;
+    const x0 = (c.ci * c.S - this.vx) * z,
+      y0 = (c.cj * c.S - this.vy) * z,
+      size = c.S * z,
+      k = z / c.b;
+    if (x0 + size < 0 || y0 + size < 0 || x0 > this.canvas.width || y0 > this.canvas.height) return;
+    if (now) {
+      chunks.delete(c.key);
+      chunks.set(c.key, c);
+      c.t = now;
+    }
+    this.ctx.drawImage(c.img, MARGIN - 1, MARGIN - 1, CHUNK + 2, CHUNK + 2, x0 - k, y0 - k, size + 2 * k, size + 2 * k);
+  }
+
+  /** A chunk at scale b (made, kept, and returned); dimmed, from the plain one. */
+  chunk(b, ci, cj, dim, key, plainKey) {
+    let img;
+    if (dim) img = dimCopy((chunks.get(plainKey) ?? this.chunk(b, ci, cj, 0, plainKey)).img, CHUNK_SIZE, CHUNK_SIZE);
+    else img = this.paintChunk(b, ci, cj);
+    const c = { key, img, view: this.uid, dim, b, ci, cj, S: CHUNK / b, t: performance.now() };
+    chunks.set(key, c);
+    chunkPixels += CHUNK_SIZE * CHUNK_SIZE;
+    // Too many: the ones seen longest ago go (not any in use now).
+    for (const [k, o] of chunks) {
+      if (chunkPixels <= CHUNK_PIXELS) break;
+      if (performance.now() - o.t < 300) continue;
+      chunks.delete(k);
+      chunkPixels -= CHUNK_SIZE * CHUNK_SIZE;
+    }
+    return c;
+  }
+
+  paintChunk(b, ci, cj) {
+    const S = CHUNK / b,
+      m = MARGIN / b;
+    const img = newCanvas(CHUNK_SIZE, CHUNK_SIZE);
+    const g = img.getContext("2d");
+    g.setTransform(b, 0, 0, b, MARGIN - ci * CHUNK, MARGIN - cj * CHUNK);
+    const x0 = ci * S - m,
+      y0 = cj * S - m,
+      x1 = x0 + S + 2 * m,
+      y1 = y0 + S + 2 * m;
+    const N = this.city.N;
+    // The ground, back to front (s = i + j, d = i - j).
+    const s0 = Math.max(0, Math.ceil((y0 - 24 - PAD) / 8)),
+      s1 = Math.min(2 * N - 2, Math.floor((y1 + PAD) / 8));
+    const d0 = Math.ceil((x0 - 16 - PAD) / 16),
+      d1 = Math.floor((x1 + 16 + PAD) / 16);
+    for (let s = s0; s <= s1; s++)
+      for (let d = d0; d <= d1; d++) {
+        if ((s + d) & 1) continue;
+        const i = (s + d) / 2,
+          j = (s - d) / 2;
+        if (i < 0 || j < 0 || i >= N || j >= N) continue;
+        blit(g, this.tiles[i * N + j], (i - j) * 16 - 16, (i + j) * 8, b);
+      }
+    for (const o of this.objs) {
+      if (o.wx - PAD > x1 || o.wy - PAD > y1 || o.wx + o.spr.w + PAD < x0 || o.wy + o.spr.h + PAD < y0) continue;
+      blit(g, o.spr, o.wx, o.wy, b);
+    }
+    return img;
+  }
+
+  /** Picture `s` at (x, y), quieter when `quiet` (and the city is). */
+  put(ctx, s, x, y, quiet = false) {
+    if (!quiet || !this.dim) return blit(ctx, s, x, y, this.b);
+    if (small(s, this.b)) return blit(ctx, s, x, y, this.b, dimmed);
+    ctx.save();
+    ctx.filter = DIM_FILTER;
+    blit(ctx, s, x, y, this.b);
+    ctx.restore();
+  }
+
+  render(now = performance.now()) {
     const { ctx, canvas, city } = this;
-    const w = canvas.width,
-      h = canvas.height;
+    const z = this.z;
+    const w = canvas.width / z,
+      h = canvas.height / z;
     const N = city.N;
     // Keep the city in view.
     const halfW = N * 16,
@@ -1608,25 +1981,30 @@ export class CityView {
     this.cy = Math.max(-TALL + h * 0.25, Math.min(span - h * 0.25 + 40, this.cy));
     if (w > halfW * 2) this.cx = 0;
     if (h > span + TALL) this.cy = span / 2 - 16;
-    const vx = Math.round(this.cx - w / 2),
-      vy = Math.round(this.cy - h / 2);
-    ctx.imageSmoothingEnabled = false;
+    const vx = (this.vx = this.cx - w / 2),
+      vy = (this.vy = this.cy - h / 2);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "#1c2a1c";
-    ctx.fillRect(0, 0, w, h);
-    ctx.drawImage(this.dim ? this.layerDim : this.layer, vx + this.ox, vy + this.oy, w, h, 0, 0, w, h);
-    ctx.save();
-    ctx.translate(-vx, -vy);
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    this.drawChunks(now);
+    ctx.setTransform(z, 0, 0, z, -vx * z, -vy * z);
+    ctx.imageSmoothingQuality = "medium";
     const t = this.time;
+    const b = this.b;
     const inView = (x, y, m = 60) => x > vx - m && x < vx + w + m && y > vy - m && y < vy + h + m;
 
     // Water glints.
     ctx.fillStyle = "#d8ecff";
     const glints = Math.min(200, Math.ceil(this.water.length / 25));
+    ctx.beginPath();
     for (let n = 0; n < glints; n++) {
       const k = this.water[Math.floor(chaos() * this.water.length)];
       const [x, y] = W(Math.floor(k / N) + chaos.range(0.2, 0.8), (k % N) + chaos.range(0.2, 0.8));
-      if (inView(x, y, 0)) ctx.fillRect(Math.round(x), Math.round(y), 2, 1);
+      if (!inView(x, y, 0)) continue;
+      ctx.moveTo(x + 1.1, y);
+      ctx.ellipse(x, y, 1.1, 0.35, 0, 0, Math.PI * 2);
     }
+    ctx.fill();
 
     // Shadows of things in the air.
     for (const f of this.flyers) f.drawShadow(ctx);
@@ -1640,9 +2018,9 @@ export class CityView {
     const queue = [];
     const inFront = (bx, by, bw, bh, i0, j0, reach, after) => {
       for (let a = 0; a <= reach; a++)
-        for (let b = 0; b <= reach; b++) {
+        for (let bb = 0; bb <= reach; bb++) {
           const i = i0 + a,
-            j = j0 + b;
+            j = j0 + bb;
           if (i < 0 || j < 0 || i >= N || j >= N) continue;
           const id = city.obj[i * N + j];
           if (id < 0 || seen.has(id)) continue;
@@ -1651,7 +2029,7 @@ export class CityView {
           if (o.wx > bx + bw || o.wx + o.spr.w < bx || o.wy > by + bh || o.wy + o.spr.h < by) continue;
           seen.add(id);
           queue.push(o);
-          list.push({ depth: o.depth, order: o.order, draw: (c) => c.drawImage(this.dim ? dimmed(o.spr) : o.spr.img, o.wx, o.wy) });
+          list.push({ depth: o.depth, order: o.order, again: true, draw: (c) => this.put(c, o.spr, o.wx, o.wy, true) });
         }
     };
     const ground = [...this.ents];
@@ -1664,15 +2042,13 @@ export class CityView {
           long: true,
           draw: (c) => {
             const s = S.vehicle("train", 0, 0, 0);
-            const [x, y] = P(p.fi, p.fj);
-            const X = Math.round(x - s.ax),
-              Y = Math.round(y - s.ay);
-            if (tr.talker?.talking) glow(c, s, X, Y, t);
-            c.drawImage(s.img, X, Y);
+            const [x, y] = W(p.fi, p.fj);
+            if (tr.talker?.talking) glow(c, s, x - s.ax, y - s.ay, t, b);
+            blit(c, s, x - s.ax, y - s.ay, b);
           },
           box: () => {
             const s = S.vehicle("train", 0, 0, 0);
-            const [x, y] = P(p.fi, p.fj);
+            const [x, y] = W(p.fi, p.fj);
             return [x - s.ax, y - s.ay, s.w, s.h];
           },
         });
@@ -1700,22 +2076,13 @@ export class CityView {
             dots.forEach(([dx, dy], d) => {
               const on = (march - (n * 2 + d)) % 4 === 0 || (march - (n * 2 + d)) % 4 === 1;
               g.globalAlpha = on ? 1 : 0.55;
-              g.fillStyle = "#202020";
-              g.fillRect(Math.round(dx) - 1, Math.round(dy), 3, 2);
-              g.fillStyle = on ? "#ffffff" : c;
-              g.fillRect(Math.round(dx) - 1, Math.round(dy) - 1, 3, 2);
-              if (on) {
-                g.fillStyle = c;
-                g.fillRect(Math.round(dx), Math.round(dy) - 1, 1, 2);
-              }
+              dot(g, dx, dy + 0.5, 1.6, "#202020");
+              dot(g, dx, dy, 1.5, on ? "#ffffff" : c);
+              if (on) dot(g, dx, dy, 0.75, c);
             });
-            if (n === ahead.length - 1) {
-              // Where it's going: a ring.
-              g.globalAlpha = 1;
-              const r = ring(colorOf(tk), true);
-              g.drawImage(r.img, Math.round(x) - r.ax, Math.round(y) - r.ay);
-            }
             g.globalAlpha = 1;
+            // Where it's going: a ring.
+            if (n === ahead.length - 1) groundRing(g, x, y, colorOf(tk), 1);
           },
           box: () => [x - 16, y - 8, 32, 16],
         });
@@ -1730,12 +2097,16 @@ export class CityView {
         fi: o.i + o.fp - 0.5,
         fj: o.j + o.fp - 0.5,
         draw: (c) => {
-          glow(c, o.spr, o.wx, o.wy, t);
-          c.drawImage(o.spr.img, o.wx, o.wy);
+          glow(c, o.spr, o.wx, o.wy, t, b);
+          blit(c, o.spr, o.wx, o.wy, b);
         },
         box: () => [o.wx - 2, o.wy - 2, o.spr.w + 4, o.spr.h + 4],
       });
     }
+    // A building drawn again only needs to cover what moves behind it, and
+    // only there is it drawn: elsewhere, its see-through bits (a fence, a
+    // tree's shadow) would be drawn over themselves, and darken.
+    const where = new Path2D();
     for (const e of ground) {
       // Off the map there's no ground to stand on: a train coming in is
       // seen from where the rails begin.
@@ -1745,6 +2116,7 @@ export class CityView {
       if (!inView(x, y)) continue;
       list.push(e);
       const [bx, by, bw, bh] = e.box(t);
+      where.rect(bx - 1, by - 1, bw + 2, bh + 2);
       inFront(bx, by, bw, bh, Math.floor(e.fi), Math.floor(e.fj), 6, (o) => o.depth > e.depth);
     }
     while (queue.length) {
@@ -1753,7 +2125,16 @@ export class CityView {
       inFront(o.wx, o.wy, o.spr.w, o.spr.h, o.i, o.j, 9, (p) => p.order > o.order);
     }
     list.sort((a, b) => a.depth - b.depth || (a.order ?? -1) - (b.order ?? -1));
-    for (const e of list) e.draw(ctx, t);
+    for (const e of list) {
+      if (!e.again) {
+        e.draw(ctx, t);
+        continue;
+      }
+      ctx.save();
+      ctx.clip(where);
+      e.draw(ctx, t);
+      ctx.restore();
+    }
     // A radio talking behind a building shows through it, as its glow.
     for (const tk of this.talkers.values()) {
       const m = tk.mover;
@@ -1763,9 +2144,9 @@ export class CityView {
         j0 = Math.floor(m.fj);
       let hidden = false;
       for (let a = 0; a <= 6 && !hidden; a++)
-        for (let b = 0; b <= 6 && !hidden; b++) {
+        for (let bb = 0; bb <= 6 && !hidden; bb++) {
           const i = i0 + a,
-            j = j0 + b;
+            j = j0 + bb;
           if (i >= N || j >= N) continue;
           const id = city.obj[i * N + j];
           const o = id >= 0 && city.objects[id];
@@ -1773,9 +2154,9 @@ export class CityView {
         }
       if (!hidden) continue;
       const sp = m.sprite(t);
-      const [x, y] = P(m.fi, m.fj);
+      const [x, y] = W(m.fi, m.fj);
       ctx.globalAlpha = 0.7;
-      glow(ctx, sp, Math.round(x - sp.ax), Math.round(y - sp.ay), t, true);
+      glow(ctx, sp, x - sp.ax, y - sp.ay, t, b, true);
       ctx.globalAlpha = 1;
     }
 
@@ -1784,8 +2165,9 @@ export class CityView {
       if (!inView(p.x, p.y, 10)) continue;
       const a = Math.min(1, p.life / p.max + 0.2);
       ctx.fillStyle = css(p.color, p.size > 1.5 ? a * 0.75 : a);
-      const s = Math.max(1, Math.round(p.size));
-      ctx.fillRect(Math.round(p.x - s / 2), Math.round(p.y - s / 2), s, s);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, Math.max(0.45, p.size / 2), 0, Math.PI * 2);
+      ctx.fill();
     }
 
     // The air: beams first, then what's flying.
@@ -1793,70 +2175,128 @@ export class CityView {
       if (f.state === "beam" && f.beamTo) {
         const [x, y] = f.screen();
         const [cx, cy] = W(f.beamTo.fi, f.beamTo.fj);
-        ctx.fillStyle = `rgba(160,255,220,${0.25 + 0.1 * Math.sin(t * 20)})`;
-        for (let yy = Math.round(y + 3); yy < cy + 2; yy++) {
-          const k = (yy - y) / Math.max(1, cy - y);
-          const half = 2 + k * 6;
-          ctx.fillRect(Math.round(x + (cx - x) * k - half), yy, Math.round(half * 2), 1);
-        }
+        const gr = ctx.createLinearGradient(0, y, 0, cy);
+        const a = 0.25 + 0.1 * Math.sin(t * 20);
+        gr.addColorStop(0, `rgba(160,255,220,${a + 0.15})`);
+        gr.addColorStop(1, `rgba(160,255,220,${a})`);
+        ctx.fillStyle = gr;
+        ctx.beginPath();
+        ctx.moveTo(x - 2, y + 3);
+        ctx.lineTo(x + 2, y + 3);
+        ctx.lineTo(cx + 8, cy + 1);
+        ctx.ellipse(cx, cy + 1, 8, 3, 0, 0, Math.PI);
+        ctx.closePath();
+        ctx.fill();
       }
     for (const f of this.flyers) f.draw(ctx, t);
 
     // Rings: sirens and the radio tower.
+    ctx.lineWidth = 0.7;
     for (const r of this.rings) {
       ctx.strokeStyle = r.color;
       ctx.globalAlpha = 1 - r.r / r.max;
-      pixelRing(ctx, r.x, r.y, r.r);
-      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.ellipse(r.x, r.y, r.r * 1.6, r.r * 0.8, 0, 0, Math.PI * 2);
+      ctx.stroke();
     }
+    ctx.globalAlpha = 1;
     // The radio tower's light blinks; brighter while anyone's talking.
     const tower = city.tower;
     if (tower?.spr) {
       const talking = [...this.talk.values()].some((x) => x.calls.size);
       if (Math.floor(t * (talking ? 4 : 1)) % 2 === 0) {
-        ctx.fillStyle = talking ? "#ff3030" : "#a02020";
-        ctx.fillRect(tower.wx + tower.spr.ax - 1, tower.wy + tower.spr.top - 1, 3, 3);
+        const x = tower.wx + tower.spr.ax,
+          y = tower.wy + tower.spr.top + 0.5;
+        const gr = ctx.createRadialGradient(x, y, 0, x, y, 4);
+        gr.addColorStop(0, talking ? "rgba(255,60,60,0.6)" : "rgba(160,32,32,0.4)");
+        gr.addColorStop(1, "rgba(255,60,60,0)");
+        ctx.fillStyle = gr;
+        ctx.beginPath();
+        ctx.arc(x, y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        dot(ctx, x, y, 1.3, talking ? "#ff3030" : "#a02020", 1);
       }
     }
     // Radio waves over buildings whose talkgroups are on the air.
+    ctx.strokeStyle = "#ffffff";
+    ctx.fillStyle = "#ffffff";
+    ctx.lineWidth = 0.6;
+    ctx.lineCap = "round";
     for (const o of this.talking()) {
       if (!o.spr) continue;
       const x = o.wx + o.spr.ax,
         y = o.wy + o.spr.top - 6;
       const ph = Math.floor(t * 4) % 3;
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(x, y, 1, 1);
+      dot(ctx, x, y, 0.6, "#ffffff", 1);
+      ctx.beginPath();
       for (let r = 1; r <= ph + 1; r++) {
-        ctx.fillRect(x - 2 * r, y - r, 1, 2 * r);
-        ctx.fillRect(x + 2 * r, y - r, 1, 2 * r);
+        ctx.moveTo(x + 2 * r * Math.cos(-0.75), y + 2 * r * Math.sin(-0.75));
+        ctx.arc(x, y, 2 * r, -0.75, 0.75);
+        ctx.moveTo(x + 2 * r * Math.cos(Math.PI - 0.75), y + 2 * r * Math.sin(Math.PI - 0.75));
+        ctx.arc(x, y, 2 * r, Math.PI - 0.75, Math.PI + 0.75, false);
       }
+      ctx.stroke();
     }
     // Rays turning over a building whose radio is talking.
+    ctx.lineWidth = 0.8;
     for (const tk of this.talkers.values()) {
       const o = tk.building;
       if (!o?.spr || !tk.talking) continue;
       const cx = o.wx + o.spr.ax,
         cy = o.wy + o.spr.top + 2;
-      ctx.fillStyle = css(colorOf(tk));
+      ctx.strokeStyle = css(colorOf(tk));
+      ctx.beginPath();
       for (let k = 0; k < 8; k++) {
         const a = (k * Math.PI) / 4 + t * 1.2;
-        for (let r = 9; r <= 14; r++) ctx.fillRect(Math.round(cx + Math.cos(a) * r * 1.4), Math.round(cy + Math.sin(a) * r * 0.75), 1, 1);
+        ctx.moveTo(cx + Math.cos(a) * 9 * 1.4, cy + Math.sin(a) * 9 * 0.75);
+        ctx.lineTo(cx + Math.cos(a) * 14 * 1.4, cy + Math.sin(a) * 14 * 0.75);
       }
+      ctx.stroke();
     }
-    // Incident signs.
+
+    // Over it all, the same size whatever the zoom (or about): signs, names, a caption.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.drawSigns(t);
+    this.drawNames(t);
+    this.drawCaption(t);
+  }
+
+  /** Device pixels to a label's unit: it grows with the zoom, from `lo` CSS pixels up to `hi`. */
+  labelScale(lo, hi) {
+    return Math.max(lo * this.dpr, Math.min(hi * this.dpr, this.z));
+  }
+
+  /** World point (x, y) on the canvas, in device pixels. */
+  toDev(x, y) {
+    return [(x - this.vx) * this.z, (y - this.vy) * this.z];
+  }
+
+  drawSigns(t) {
+    const ctx = this.ctx;
+    const k = this.labelScale(1.2, 2.4);
     this.icons = [];
     for (const inc of this.incidents) {
       if (inc.over) continue;
       const p = this.iconAt(inc);
       if (!p) continue;
-      const [x, y] = p;
-      if (inc.live && Math.floor(t * 3) % 2) continue;
+      const [sx, sy] = this.toDev(p[0], p[1]);
+      if (sx < -40 * k || sy < -40 * k || sx > this.canvas.width + 40 * k || sy > this.canvas.height + 40 * k) continue;
       const s = S.icon(iconKind(inc));
-      const bob = Math.round(Math.sin(t * 3 + inc.born) * 1.2);
-      ctx.drawImage(s.img, Math.round(x - s.ax), Math.round(y - s.ay + bob));
-      this.icons.push({ inc, x: x - s.ax, y: y - s.ay, w: s.w, h: s.h });
+      const bob = Math.sin(t * 3 + inc.born) * 1.2;
+      // Blinking while it's on the air.
+      ctx.globalAlpha = inc.live ? 0.35 + 0.65 * (0.5 + 0.5 * Math.cos(t * Math.PI * 3)) : 1;
+      ctx.setTransform(k, 0, 0, k, sx, sy + bob * k);
+      blit(ctx, s, -s.ax, -s.ay, scaleFor(k));
+      this.icons.push({ inc, x: sx - s.ax * k, y: sy - s.ay * k, w: s.w * k, h: s.h * k });
     }
-    // Names over the radios talking (and for a moment after, to be read).
+    ctx.globalAlpha = 1;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  /** Names over the radios talking (and for a moment after, to be read). */
+  drawNames(t) {
+    const ctx = this.ctx;
+    const k = this.labelScale(1.25, 2);
     const taken = [];
     const ids = this.opts.unitIds?.() ?? false;
     // A building's latest radio speaks for it: one bubble each.
@@ -1865,21 +2305,65 @@ export class CityView {
     for (const tk of [...this.talkers.values()].sort((a, b) => a.heard - b.heard)) {
       if (!tk.talking && t - tk.heard > 2.5) continue;
       if (tk.building && latest.get(tk.building) !== tk) continue;
-      const text = tk.name || (ids ? `ID ${tk.unit}` : "");
+      const text = (tk.name || (ids ? `ID ${tk.unit}` : "")).toUpperCase().slice(0, 18);
       if (!text) continue;
       const at = this.talkerAt(tk);
-      if (!at || !inView(at.x, at.y, 40)) continue;
-      const b = bubble(text, colorOf(tk));
-      let x = Math.round(at.x - b.ax),
-        y = Math.round(at.y - 3 - b.ay);
+      if (!at) continue;
+      const [sx, sy] = this.toDev(at.x, at.y - 3);
+      if (sx < -200 || sy < -60 || sx > this.canvas.width + 200 || sy > this.canvas.height + 60) continue;
+      ctx.font = `bold ${8 * k}px ${MONO_FONT()}`;
+      const bw = ctx.measureText(text).width + 9 * k,
+        bh = 12 * k,
+        tail = 3 * k;
+      let x = sx - bw / 2,
+        y = sy - tail - bh;
       // Out of each other's way: step up.
-      for (let n = 0; n < 6 && taken.some((r) => x < r[0] + r[2] && x + b.w > r[0] && y < r[1] + r[3] && y + b.h > r[1]); n++) y -= b.h - 2;
-      taken.push([x, y, b.w, b.h]);
+      for (let n = 0; n < 6 && taken.some((r) => x < r[0] + r[2] && x + bw > r[0] && y < r[1] + r[3] && y + bh > r[1]); n++) y -= bh - 2 * k;
+      taken.push([x, y, bw, bh]);
       ctx.globalAlpha = tk.talking ? 1 : 0.6;
-      ctx.drawImage(b.img, x, y);
+      bubble(ctx, x, y, bw, bh, sx, Math.max(sy, y + bh + tail), k, colorOf(tk));
+      ctx.fillStyle = "#202020";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, x + 5.5 * k, y + bh / 2 + 0.5 * k);
       ctx.globalAlpha = 1;
     }
-    ctx.restore();
+  }
+
+  /** In Follow, who's on: a caption at the bottom, like the news. */
+  drawCaption(t) {
+    const sh = this.shot;
+    if (!this.follow || !sh?.tk) return;
+    const tk = sh.tk;
+    const ctx = this.ctx;
+    const k = this.labelScale(1.3, 1.8);
+    const a = Math.min(1, (t - sh.since) / 0.8) * (tk.talking ? 1 : 0.55);
+    if (a <= 0) return;
+    const name = tk.name || `Radio ${tk.unit}`;
+    const sub = `${tk.ev?.alphaTag ?? ""}${tk.ev?.encrypted ? " · encrypted" : ""}`;
+    ctx.font = `bold ${11 * k}px ${MONO_FONT()}`;
+    const w1 = ctx.measureText(name).width;
+    ctx.font = `${8 * k}px ${MONO_FONT()}`;
+    const w2 = ctx.measureText(sub).width;
+    const w = Math.max(w1, w2) + 22 * k,
+      h = 30 * k;
+    const x = 10 * k,
+      y = this.canvas.height - h - 10 * k;
+    ctx.globalAlpha = a;
+    ctx.fillStyle = "rgba(16,20,28,0.78)";
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 3 * k);
+    ctx.fill();
+    ctx.fillStyle = css(colorOf(tk));
+    ctx.fillRect(x, y, 4 * k, h);
+    if (tk.talking) dot(ctx, x + 12 * k, y + 10.5 * k, 2.6 * k, `rgba(255,70,70,${0.6 + 0.4 * Math.sin(t * 6)})`, 1);
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = `bold ${11 * k}px ${MONO_FONT()}`;
+    ctx.fillText(name, x + 18 * k, y + 10.5 * k);
+    ctx.fillStyle = "#b8c4d8";
+    ctx.font = `${8 * k}px ${MONO_FONT()}`;
+    ctx.fillText(sub, x + 12 * k, y + 22 * k);
+    ctx.globalAlpha = 1;
   }
 
   iconAt(inc) {
@@ -1925,31 +2409,49 @@ export class CityView {
     const pointers = new Map();
     let drag = null,
       pinch = null;
+    const two = () => {
+      const [a, b] = [...pointers.values()];
+      return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, Math.hypot(a[0] - b[0], a[1] - b[1])];
+    };
     this._down = (e) => {
       c.setPointerCapture(e.pointerId);
       pointers.set(e.pointerId, [e.clientX, e.clientY]);
+      // A hand on the camera: whatever it was doing, it stops.
+      this.flight = null;
+      this.zt = this.anchor = null;
       if (pointers.size === 1) drag = { x: e.clientX, y: e.clientY, cx: this.cx, cy: this.cy, moved: false };
       if (pointers.size === 2) {
-        const [a, b] = [...pointers.values()];
-        pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]) };
+        const [mx, my, d] = two();
+        pinch = { d: Math.max(1, d), z: this.z, at: this.toWorld(mx, my) };
         drag = null;
       }
     };
     this._move = (e) => {
       if (pointers.has(e.pointerId)) pointers.set(e.pointerId, [e.clientX, e.clientY]);
       if (pinch && pointers.size === 2) {
-        const [a, b] = [...pointers.values()];
-        const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
-        if (d / pinch.d > 1.35) (this.zoomBy(1, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]), (pinch.d = d));
-        else if (d / pinch.d < 0.74) (this.zoomBy(-1, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]), (pinch.d = d));
+        // The two fingers keep the same spot of the city between them.
+        const [mx, my, d] = two();
+        this.hands();
+        this.dragging = true;
+        this.z = this.zoom = this.clampZ((pinch.z * d) / pinch.d);
+        const [sx, sy] = this.devAt(mx, my);
+        this.cx = pinch.at[0] - (sx - this.canvas.width / 2) / this.z;
+        this.cy = pinch.at[1] - (sy - this.canvas.height / 2) / this.z;
         return;
       }
       if (drag) {
         const dx = e.clientX - drag.x,
           dy = e.clientY - drag.y;
-        if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
-        this.cx = drag.cx - (dx * this.dpr) / this.z;
-        this.cy = drag.cy - (dy * this.dpr) / this.z;
+        if (!drag.moved && Math.abs(dx) + Math.abs(dy) > 3) {
+          drag.moved = true;
+          this.dragging = true;
+          this.zoom ??= this.z;
+        }
+        if (drag.moved) {
+          this.hands();
+          this.cx = drag.cx - (dx * this.dpr) / this.z;
+          this.cy = drag.cy - (dy * this.dpr) / this.z;
+        }
         this.opts.onHover?.(null);
         return;
       }
@@ -1960,14 +2462,15 @@ export class CityView {
       if (pointers.size < 2) pinch = null;
       if (drag && !drag.moved && e.pointerType !== "mouse") this.opts.onHover?.(this.pick(e.clientX, e.clientY), e.clientX, e.clientY);
       drag = null;
+      if (!pointers.size) this.dragging = false;
     };
     this._wheel = (e) => {
       e.preventDefault();
-      this._wheelAcc = (this._wheelAcc ?? 0) + e.deltaY;
-      if (Math.abs(this._wheelAcc) > 60) {
-        this.zoomBy(this._wheelAcc < 0 ? 1 : -1, [e.clientX, e.clientY]);
-        this._wheelAcc = 0;
-      }
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
+      // A pinch on a trackpad comes as a wheel with ctrl held, in small steps.
+      const f = Math.exp(-e.deltaY * unit * (e.ctrlKey ? 0.012 : 0.0022));
+      this.hands();
+      this.zoomTo((this.zt ?? this.z) * f, [e.clientX, e.clientY]);
     };
     this._leave = () => this.opts.onHover?.(null);
     c.addEventListener("pointerdown", this._down);
@@ -1980,8 +2483,9 @@ export class CityView {
 
   /** What's under the pointer: an incident sign, or a building with talkgroups. */
   pick(clientX, clientY) {
-    const [x, y] = this.toWorld(clientX, clientY);
-    for (const ic of this.icons ?? []) if (x >= ic.x && x < ic.x + ic.w && y >= ic.y && y < ic.y + ic.h) return { incident: ic.inc };
+    const [sx, sy] = this.devAt(clientX, clientY);
+    for (const ic of this.icons ?? []) if (sx >= ic.x && sx < ic.x + ic.w && sy >= ic.y && sy < ic.y + ic.h) return { incident: ic.inc };
+    const [x, y] = this.fromDev(sx, sy);
     for (const tk of this.talkers.values()) {
       if (tk.building) continue; // its building answers below
       const at = this.talkerAt(tk);
@@ -2009,10 +2513,59 @@ export class CityView {
     c.removeEventListener("pointercancel", this._up);
     c.removeEventListener("pointerleave", this._leave);
     c.removeEventListener("wheel", this._wheel);
+    for (const [k, ch] of chunks)
+      if (ch.view === this.uid) {
+        chunks.delete(k);
+        chunkPixels -= CHUNK_SIZE * CHUNK_SIZE;
+      }
   }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+let viewCount = 0;
+/** Chunks of the cities' ground and buildings, by view, dimming, scale and place; the least lately used first. */
+const chunks = new Map();
+let chunkPixels = 0;
+/** Until when, this frame, chunks may be drawn. */
+const chunkClock = { now: -1, until: 0 };
+const DIM_FILTER = "saturate(55%) brightness(80%)";
+let mono = null;
+/** The page's monospace font, for names and captions. */
+const MONO_FONT = () => (mono ??= getComputedStyle(document.documentElement).getPropertyValue("--mono").trim() || 'ui-monospace, "SF Mono", Menlo, Consolas, monospace');
+
+/**
+ * The smoothest way from view p0 to p1, each [x, y, w] (w: how wide it
+ * is): out, across and in, as far out as the distance asks (van Wijk and
+ * Nuij, "Smooth and efficient zooming and panning", 2003). `at(t)` for t
+ * from 0 to 1; S, how long the way is.
+ */
+function zoomPath(p0, p1) {
+  const RHO = Math.SQRT2;
+  const [ux0, uy0, w0] = p0,
+    [ux1, uy1, w1] = p1;
+  const dx = ux1 - ux0,
+    dy = uy1 - uy0,
+    d2 = dx * dx + dy * dy;
+  if (d2 < 1e-6) {
+    const S = Math.log(w1 / w0) / RHO;
+    return { S, at: (t) => [ux0 + t * dx, uy0 + t * dy, w0 * Math.exp(RHO * t * S)] };
+  }
+  const d1 = Math.sqrt(d2);
+  const b0 = (w1 * w1 - w0 * w0 + 4 * d2) / (2 * w0 * 2 * d1),
+    b1 = (w1 * w1 - w0 * w0 - 4 * d2) / (2 * w1 * 2 * d1);
+  const r0 = Math.log(Math.sqrt(b0 * b0 + 1) - b0),
+    r1 = Math.log(Math.sqrt(b1 * b1 + 1) - b1);
+  const S = (r1 - r0) / RHO;
+  return {
+    S,
+    at: (t) => {
+      const s = t * S;
+      const u = (w0 / (2 * d1)) * (Math.cosh(r0) * Math.tanh(RHO * s + r0) - Math.sinh(r0));
+      return [ux0 + u * dx, uy0 + u * dy, (w0 * Math.cosh(r0)) / Math.cosh(RHO * s + r0)];
+    },
+  };
+}
 
 // Dispatchers and consoles: a building, not a vehicle.
 const DISPATCH = /\b(disp(atch(er)?)?|dsp|console|cad|comms?|communications|911|psap|ecc|ouc|base|control)\b/i;
@@ -2061,33 +2614,37 @@ export function talkerKind(ev, name = "") {
   }
 }
 
-/** A glow around sprite `s` drawn at (x, y): pulsing, for a radio that's talking. */
-function glow(ctx, s, x, y, time, keepAlpha = false) {
-  if (!s.halo) {
-    const c = document.createElement("canvas");
-    c.width = s.w + 4;
-    c.height = s.h + 4;
-    const g = c.getContext("2d");
-    for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1], [-2, 0], [2, 0], [0, -2], [0, 2], [-1, -1], [1, 1], [-1, 1], [1, -1]]) g.drawImage(s.img, 2 + dx, 2 + dy);
-    g.globalCompositeOperation = "source-in";
-    g.fillStyle = "#fff27a";
-    g.fillRect(0, 0, c.width, c.height);
-    s.halo = c;
-  }
+/** A glow around picture `s` drawn at (x, y): pulsing, for a radio that's talking. */
+function glow(ctx, s, x, y, time, b, keepAlpha = false) {
   const was = ctx.globalAlpha;
   ctx.globalAlpha = (keepAlpha ? was : 1) * (0.55 + 0.45 * Math.sin(time * 7));
-  ctx.drawImage(s.halo, x - 2, y - 2);
+  // A big picture's glow needn't be sharp.
+  blit(ctx, s, x, y, small(s, b) ? b : Math.min(b, 4), halo);
   ctx.globalAlpha = was;
+}
+
+/** A bitmap's halo: its shape, spread a little all round, in yellow. */
+function halo(r) {
+  if (r.halo) return r.halo;
+  const c = newCanvas(r.img.width, r.img.height);
+  const g = c.getContext("2d");
+  for (const d of [0.6, 1.2])
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2;
+      g.drawImage(r.img, Math.cos(a) * d * r.b, Math.sin(a) * d * r.b);
+    }
+  g.globalCompositeOperation = "source-in";
+  g.fillStyle = "#fff27a";
+  g.fillRect(0, 0, c.width, c.height);
+  return (r.halo = c);
 }
 
 /** A canvas, quieter: less color and light. */
 function dimCopy(src, w, h) {
-  const c = document.createElement("canvas");
-  c.width = w;
-  c.height = h;
+  const c = newCanvas(w, h);
   const g = c.getContext("2d");
   const filters = "filter" in CanvasRenderingContext2D.prototype;
-  if (filters) g.filter = "saturate(55%) brightness(80%)";
+  if (filters) g.filter = DIM_FILTER;
   g.drawImage(src, 0, 0);
   if (!filters) {
     // No filters here: a wash of shade over what's drawn instead.
@@ -2098,58 +2655,62 @@ function dimCopy(src, w, h) {
   return c;
 }
 
-/** Sprite `s`, quieter (kept with it). */
-function dimmed(s) {
-  return (s.dim ??= dimCopy(s.img, s.w, s.h));
+/** A bitmap, quieter (kept with it). */
+function dimmed(r) {
+  return (r.dim ??= dimCopy(r.img, r.img.width, r.img.height));
 }
 
-/** A diamond ring on the ground, a tile wide, in `color`: brighter when `on`. Anchored at its middle. */
-const rings = new Map();
-function ring(color, on) {
-  const key = `${color}|${on}`;
-  let r = rings.get(key);
-  if (r) return r;
-  const p = new Pix(25, 13);
-  const c = on ? color : mix(color, 0x000000, 0.25);
-  for (let dx = -11; dx <= 11; dx++) {
-    const dy = Math.round((11 - Math.abs(dx)) / 2);
-    p.set(12 + dx, 6 - dy, c, on ? 255 : 150);
-    p.set(12 + dx, 6 + dy, c, on ? 255 : 150);
-    if (on) {
-      p.set(12 + dx, 6 - dy + 1, c, 90);
-      p.set(12 + dx, 6 + dy - 1, c, 90);
-    }
+/** A diamond ring on the ground, a tile wide, in `color`: faint at `level` 0, bright at 1. */
+function groundRing(ctx, x, y, color, level) {
+  ctx.beginPath();
+  ctx.moveTo(x - 11.5, y);
+  ctx.lineTo(x, y - 5.9);
+  ctx.lineTo(x + 11.5, y);
+  ctx.lineTo(x, y + 5.9);
+  ctx.closePath();
+  if (level > 0) {
+    ctx.fillStyle = css(color, 0.14 * level);
+    ctx.fill();
   }
-  rings.set(key, (r = sprite(p, 12, 6)));
-  return r;
+  ctx.strokeStyle = level > 0 ? css(color, 0.55 + 0.45 * level) : css(mix(color, 0x000000, 0.25), 0.6);
+  ctx.lineWidth = level > 0 ? 0.9 + 0.5 * level : 0.8;
+  ctx.lineJoin = "round";
+  ctx.stroke();
 }
 
-/** A speech bubble with `text` in it (the pixel font, capitals), its anchor the tip of its tail. */
-const bubbles = new Map();
-function bubble(text, color = 0xffffff) {
-  text = text.toUpperCase().slice(0, 18);
-  const key = `${text}|${color}`;
-  let b = bubbles.get(key);
-  if (b) return b;
-  const w = textWidth(text) + 7,
-    h = 13;
-  const p = new Pix(w, h + 3);
-  p.rect(1, 0, w - 2, h, 0x202020);
-  p.rect(0, 1, w, h - 2, 0x202020);
-  p.rect(1, 1, w - 2, h - 2, 0xfffff4);
-  const mid = Math.floor(w / 2);
-  p.rect(mid - 2, h - 1, 5, 1, 0xfffff4);
-  p.rect(mid - 1, h, 3, 1, 0xfffff4);
-  p.set(mid, h + 1, 0xfffff4);
-  p.set(mid - 3, h - 1, 0x202020), p.set(mid + 3, h - 1, 0x202020);
-  p.set(mid - 2, h, 0x202020), p.set(mid + 2, h, 0x202020);
-  p.set(mid - 1, h + 1, 0x202020), p.set(mid + 1, h + 1, 0x202020);
-  p.set(mid, h + 2, 0x202020);
-  p.rect(1, 1, 2, h - 2, color); // its service's color, down the side
-  bitmapText(p, text, 4, 3, 0x202020);
-  if (bubbles.size > 500) bubbles.clear();
-  bubbles.set(key, (b = sprite(p, mid, h + 2)));
-  return b;
+/** A dot on the ground (squashed, as the ground is), or upright (squash 1). */
+function dot(ctx, x, y, r, color, squash = 0.55) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.ellipse(x, y, r, r * squash, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+/** A speech bubble at (x, y), w × h device pixels, its tail's tip at (tx, ty), its service's color down its side. */
+function bubble(ctx, x, y, w, h, tx, ty, k, color) {
+  ctx.fillStyle = "#fffff4";
+  ctx.strokeStyle = "#202020";
+  ctx.lineWidth = 0.9 * k;
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 2.5 * k);
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(tx - 2.6 * k, y + h - 1.2 * k);
+  ctx.lineTo(tx, ty);
+  ctx.lineTo(tx + 2.6 * k, y + h - 1.2 * k);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(tx - 2.6 * k, y + h);
+  ctx.lineTo(tx, ty);
+  ctx.lineTo(tx + 2.6 * k, y + h);
+  ctx.stroke();
+  ctx.fillStyle = css(color);
+  ctx.beginPath();
+  ctx.roundRect(x + 1.3 * k, y + 1.3 * k, 2.3 * k, h - 2.6 * k, k);
+  ctx.fill();
 }
 
 function iconKind(inc) {
@@ -2159,74 +2720,90 @@ function iconKind(inc) {
   return inc.type;
 }
 
-/** The first row of a sprite with anything in it. */
+/** The first row of a picture with anything in it (in art units from its top). */
 function topRow(spr) {
-  const d = spr.img.getContext("2d").getImageData(0, 0, spr.w, spr.h).data;
-  for (let y = 0; y < spr.h; y++) for (let x = 0; x < spr.w; x++) if (d[(y * spr.w + x) * 4 + 3]) return y;
+  const r = raster(spr, 1);
+  const { width: w, height: h } = r.img;
+  const d = r.img.getContext("2d").getImageData(0, 0, w, h).data;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (d[(y * w + x) * 4 + 3] > 40) return y - PAD;
   return 0;
 }
 
+/** Is there anything at (x, y) of picture `spr`? */
 function opaque(spr, x, y) {
-  spr.alpha ??= spr.img.getContext("2d").getImageData(0, 0, spr.w, spr.h).data;
-  return spr.alpha[(y * spr.w + x) * 4 + 3] > 0;
-}
-
-function pixelRing(ctx, x, y, r) {
-  ctx.fillStyle = ctx.strokeStyle;
-  const n = Math.max(12, Math.round(r * 3));
-  for (let k = 0; k < n; k++) {
-    const a = (k / n) * Math.PI * 2;
-    ctx.fillRect(Math.round(x + Math.cos(a) * r * 1.6), Math.round(y + Math.sin(a) * r * 0.8), 1, 1);
+  if (!spr.alpha) {
+    const r = raster(spr, 1);
+    spr.alpha = { d: r.img.getContext("2d").getImageData(0, 0, r.img.width, r.img.height).data, w: r.img.width, h: r.img.height };
   }
+  const a = spr.alpha,
+    px = x + PAD,
+    py = y + PAD;
+  if (px < 0 || py < 0 || px >= a.w || py >= a.h) return false;
+  return a.d[(py * a.w + px) * 4 + 3] > 40;
 }
 
-let coneSprite = null;
-function cone() {
-  if (coneSprite) return coneSprite;
-  const c = document.createElement("canvas");
-  c.width = 3;
-  c.height = 4;
-  const g = c.getContext("2d");
-  g.fillStyle = "#f08a1c";
-  g.fillRect(1, 0, 1, 3);
-  g.fillRect(0, 2, 3, 1);
-  g.fillStyle = "#ffffff";
-  g.fillRect(1, 1, 1, 1);
+const coneArt = art(3, 4.4, 1.5, 3.8, (g) => {
   g.fillStyle = "#404040";
-  g.fillRect(0, 3, 3, 1);
-  return (coneSprite = { img: c, ax: 1, ay: 3, w: 3, h: 4 });
-}
+  g.beginPath();
+  g.ellipse(1.5, 3.7, 1.5, 0.55, 0, 0, Math.PI * 2);
+  g.fill();
+  g.fillStyle = "#f08a1c";
+  g.beginPath();
+  g.moveTo(1.5, 0.2);
+  g.lineTo(2.35, 3.6);
+  g.lineTo(0.65, 3.6);
+  g.closePath();
+  g.fill();
+  g.fillStyle = "#ffffff";
+  g.beginPath();
+  g.moveTo(1.13, 1.5);
+  g.lineTo(1.87, 1.5);
+  g.lineTo(2.02, 2.1);
+  g.lineTo(0.98, 2.1);
+  g.closePath();
+  g.fill();
+});
+const cone = () => coneArt;
 
 const people = new Map();
 function person(color) {
   let s = people.get(color);
-  if (s) return s;
-  const c = document.createElement("canvas");
-  c.width = 1;
-  c.height = 3;
-  const g = c.getContext("2d");
-  g.fillStyle = "#f0c8a0";
-  g.fillRect(0, 0, 1, 1);
-  g.fillStyle = css(color);
-  g.fillRect(0, 1, 1, 2);
-  s = { img: c, ax: 0, ay: 2, w: 1, h: 3 };
-  people.set(color, s);
+  if (!s)
+    people.set(
+      color,
+      (s = art(1.6, 3.6, 0.8, 3.4, (g) => {
+        g.fillStyle = "#3a3a48";
+        g.fillRect(0.45, 2.4, 0.7, 1.1);
+        g.fillStyle = css(color);
+        g.beginPath();
+        g.roundRect(0.25, 1.15, 1.1, 1.5, 0.35);
+        g.fill();
+        g.fillStyle = "#f0c8a0";
+        g.beginPath();
+        g.arc(0.8, 0.65, 0.48, 0, Math.PI * 2);
+        g.fill();
+      })),
+    );
   return s;
 }
 
-let footSprite = null;
-function bigfoot() {
-  if (footSprite) return footSprite;
-  const c = document.createElement("canvas");
-  c.width = 4;
-  c.height = 7;
-  const g = c.getContext("2d");
+const footArt = art(4, 7.2, 2, 6.8, (g, lod) => {
+  // Always a little out of focus.
+  g.filter = `blur(${0.3 * lod}px)`;
   g.fillStyle = "#5a3a20";
-  g.fillRect(1, 0, 2, 2);
-  g.fillRect(0, 2, 4, 3);
-  g.fillRect(0, 5, 1, 2);
-  g.fillRect(3, 5, 1, 2);
+  g.beginPath();
+  g.ellipse(2, 1.1, 0.95, 1, 0, 0, Math.PI * 2);
+  g.ellipse(2, 3.4, 1.7, 1.9, 0, 0, Math.PI * 2);
+  g.fill();
+  g.fillRect(0.7, 4.6, 0.9, 2.2);
+  g.fillRect(2.4, 4.6, 0.9, 2.2);
+  g.beginPath();
+  g.moveTo(0.4, 2.4);
+  g.lineTo(-0.1, 4.6);
+  g.lineTo(0.6, 4.6);
+  g.fill();
   g.fillStyle = "#2a1a10";
-  g.fillRect(1, 1, 1, 1);
-  return (footSprite = { img: c, ax: 2, ay: 6, w: 4, h: 7 });
-}
+  g.fillRect(1.5, 0.8, 0.4, 0.3);
+  g.filter = "none";
+});
+const bigfoot = () => footArt;

@@ -257,7 +257,6 @@ body[data-view="quad"] .tile-head {
 canvas.city {
   position: absolute;
   inset: 0;
-  image-rendering: pixelated;
   display: block;
 }
 .tile-news {

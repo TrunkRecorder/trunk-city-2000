@@ -21,6 +21,8 @@ const DEFAULTS = {
   dim: false,
   /** Radios with no name labeled by their ID. */
   unitIds: false,
+  /** The camera follows whoever's talking. */
+  follow: false,
 };
 
 export function load() {
