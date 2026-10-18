@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+- For the recorder release after v0.1.15: a system's talkgroup file comes from the recorder on its
+  own (`rec.talkgroupFiles`), not inside the config, and the city is rebuilt when it changes. Calls
+  and live audio name their system by the recorder's `status.systemNames`.
+
 ## [0.3.0]
 
 - The city is in full color again: what's on the radio stands out by its own light instead of the

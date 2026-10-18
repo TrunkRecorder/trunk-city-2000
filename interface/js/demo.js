@@ -125,10 +125,11 @@ export class DemoClient {
     this.demo = true;
     this.version = "demo";
     this.phase = { phase: "running", error: null, ended: false };
-    this.config = { systems: SYSTEMS.map(({ csv, ...s }) => ({ ...s, enabled: true, talkgroupsCsv: csv })), conventional: [] };
+    this.config = { systems: SYSTEMS.map(({ csv, ...s }) => ({ ...s, enabled: true })), conventional: [] };
+    this.talkgroupFiles = Object.fromEntries(SYSTEMS.map((s) => [s.shortName, s.csv]));
     this.calls = [];
     this.history = [];
-    this.status = { nowS: 0, systems: SYSTEMS.map((s, index) => ({ index, shortName: s.shortName })) };
+    this.status = { nowS: 0, systemNames: SYSTEMS.map((s) => s.shortName), systems: SYSTEMS.map((s, index) => ({ index, shortName: s.shortName })) };
     this.handlers = new Map();
     this.nextId = 1;
     this.followUps = [];
@@ -153,7 +154,7 @@ export class DemoClient {
   }
 
   talkgroups(short) {
-    if (!this._tg.has(short)) this._tg.set(short, this.parse(this.config.systems.find((s) => s.shortName === short)?.talkgroupsCsv ?? ""));
+    if (!this._tg.has(short)) this._tg.set(short, this.parse(this.talkgroupFiles[short] ?? ""));
     return this._tg.get(short);
   }
 
